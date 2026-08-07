@@ -1,0 +1,54 @@
+# Visual Studio and IDE state
+.vs/
+.vscode/
+*.suo
+*.user
+*.vcxproj.user
+
+# CMake and generated build trees
+build/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+build.ninja
+.ninja_deps
+.ninja_log
+
+# Compiled and linker artifacts
+*.exe
+*.dll
+*.lib
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.ipch
+
+# Runtime output and generated terrain/path data
+output/
+
+# Local SDK/vendor bundle. Obtain dependencies through the authorized SDK source.
+third_party/
+
+# Local environment and secret files
+.env
+.env.*
+*.key
+*.pem
+*.pfx
+*.p12
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Temporary/editor files
+*.tmp
+*.bak
+*.swp
+*.orig

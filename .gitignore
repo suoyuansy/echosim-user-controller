@@ -1,0 +1,19 @@
+# 构建产物(CMake/Ninja 输出)与调试输出(代价地图缓存、路径文件)
+out/
+output/
+
+# 依赖包:EchoSim SDK + OpenCV,体积大不入库,获取方式见 README.md
+third_party/
+
+# Visual Studio 本地缓存
+.vs/
+*.user
+*.suo
+*.ipch
+*.aps
+
+# 临时/调试产物
+*.log
+*.obj
+*.pdb
+*.exe

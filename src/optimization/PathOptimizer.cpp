@@ -36,11 +36,46 @@ bool cell_is_clear_(const TerrainGrid& grid, int row, int col, int margin)
     return true;
 }
 
+bool footprint_is_clear_at_(const TerrainGrid& grid, double x, double y,
+                            double yaw, double length_m, double width_m,
+                            double sample_step_m)
+{
+    const double step = std::clamp(sample_step_m, 0.2, grid.resolution_m);
+    const int length_steps = std::max(1, static_cast<int>(std::ceil(
+        length_m / step)));
+    const int width_steps = std::max(1, static_cast<int>(std::ceil(
+        width_m / step)));
+    const double half_length = 0.5 * length_m;
+    const double half_width = 0.5 * width_m;
+    const double cos_yaw = std::cos(yaw);
+    const double sin_yaw = std::sin(yaw);
+    for (int length_index = 0; length_index <= length_steps; ++length_index)
+    {
+        const double forward = -half_length + length_m * length_index
+            / static_cast<double>(length_steps);
+        for (int width_index = 0; width_index <= width_steps; ++width_index)
+        {
+            const double side = -half_width + width_m * width_index
+                / static_cast<double>(width_steps);
+            const double sample_x = x + forward * cos_yaw - side * sin_yaw;
+            const double sample_y = y + forward * sin_yaw + side * cos_yaw;
+            int col = 0;
+            int row = 0;
+            if (!grid.worldToGrid(sample_x, sample_y, col, row)
+                || !grid.isTraversable(row, col))
+                return false;
+        }
+    }
+    return true;
+}
+
 // 判断两点间直线是否全程满足余量要求，采用定步长采样（端点本身已由路径保证）。
 // 输入：起终点为世界坐标（米），sample_step 为采样步长（米），margin 为
 // 栅格余量圈数；返回：true 表示线段上每个采样点连同其 margin 圈邻域均安全。
 bool line_is_clear_(const TerrainGrid& grid, const PathPoint& from,
-                    const PathPoint& to, double sample_step, int margin)
+                    const PathPoint& to, double sample_step, int margin,
+                    double vehicle_length_m, double vehicle_width_m,
+                    double footprint_step_m)
 {
     // 线段长度（米）与按采样步长向上取整折算的等分段数；至少 1 段，
     // 保证极短线段也能进入采样循环且除法不失效。
@@ -62,6 +97,10 @@ bool line_is_clear_(const TerrainGrid& grid, const PathPoint& from,
             return false;
         // 采样点所在栅格连同 margin 圈邻域必须全部可通行。
         if (!cell_is_clear_(grid, row, col, margin))
+            return false;
+        const double yaw = std::atan2(to.y - from.y, to.x - from.x);
+        if (!footprint_is_clear_at_(grid, x, y, yaw, vehicle_length_m,
+                                    vehicle_width_m, footprint_step_m))
             return false;
     }
     return true;
@@ -182,7 +221,8 @@ CornerArc_ build_corner_arc_(const PathPoint& vertex, const PathPoint& prev,
 // 输入：arc 为已构造的切向圆弧，sample_step 为采样步长（米），margin 为
 // 栅格余量圈数；返回：true 表示圆弧上每个采样点均安全。
 bool arc_is_clear_(const TerrainGrid& grid, const CornerArc_& arc,
-                   double sample_step, int margin)
+                   double sample_step, int margin, double vehicle_length_m,
+                   double vehicle_width_m, double footprint_step_m)
 {
     // 圆弧弧长 = |sweep|*radius（米），按采样步长向上取整折算等分角数。
     // 与直线检查不同，这里连端点（切入/切出点）也一并校验（k = 0..steps），
@@ -206,6 +246,12 @@ bool arc_is_clear_(const TerrainGrid& grid, const CornerArc_& arc,
         // 采样点所在栅格连同 margin 圈邻域必须全部可通行。
         if (!cell_is_clear_(grid, row, col, margin))
             return false;
+        const double tangent_yaw = angle
+            + (arc.sweep >= 0.0 ? 0.5 * kPi : -0.5 * kPi);
+        if (!footprint_is_clear_at_(grid, x, y, tangent_yaw,
+                                    vehicle_length_m, vehicle_width_m,
+                                    footprint_step_m))
+            return false;
     }
     return true;
 }
@@ -217,7 +263,9 @@ bool arc_is_clear_(const TerrainGrid& grid, const CornerArc_& arc,
 bool shortcut_corner_acceptable_(const Path& result, const Path& raw,
                                  std::size_t anchor, std::size_t farthest,
                                  const TerrainGrid& grid, double corner_radius,
-                                 double sample_step, int margin)
+                                 double sample_step, int margin,
+                                 double vehicle_length_m, double vehicle_width_m,
+                                 double footprint_step_m)
 {
     // 未启用曲率约束（corner_radius <= 0），或起点尚无来向直段
     // （result 只有首点）时，无需折角校验，直接接受。
@@ -236,7 +284,8 @@ bool shortcut_corner_acceptable_(const Path& result, const Path& raw,
     if (std::abs(arc.sweep) < 1e-6)
         return true;
     // 圆弧向转角内侧切削，落在两条已校验直段之间的未校验区域，必须单独校验。
-    return arc_is_clear_(grid, arc, sample_step, margin);
+    return arc_is_clear_(grid, arc, sample_step, margin, vehicle_length_m,
+                         vehicle_width_m, footprint_step_m);
 }
 
 // 视线捷径：从锚点向后扫描最远的可直线直达且角点运动学可行的点，
@@ -245,7 +294,9 @@ bool shortcut_corner_acceptable_(const Path& result, const Path& raw,
 // 跨度（米），sample_step/margin 为直线采样与余量参数，corner_radius 为
 // 折角圆弧半径（米，0 表示不做折角校验）；返回：精简后的路径（首尾点必保留）。
 Path shortcut_(const Path& raw, const TerrainGrid& grid, double max_distance_m,
-               double sample_step, int margin, double corner_radius)
+               double sample_step, int margin, double corner_radius,
+               double vehicle_length_m, double vehicle_width_m,
+               double footprint_step_m)
 {
     Path result;
     result.reserve(raw.size());
@@ -265,10 +316,14 @@ Path shortcut_(const Path& raw, const TerrainGrid& grid, double max_distance_m,
         // 最坏退到 anchor+1，即保留原始相邻段（原折线必可行）。
         while (farthest > anchor + 1
                && (!line_is_clear_(grid, raw[anchor], raw[farthest],
-                                   sample_step, margin)
+                                   sample_step, margin, vehicle_length_m,
+                                   vehicle_width_m, footprint_step_m)
                    || !shortcut_corner_acceptable_(result, raw, anchor, farthest,
                                                    grid, corner_radius,
-                                                   sample_step, margin)))
+                                                   sample_step, margin,
+                                                   vehicle_length_m,
+                                                   vehicle_width_m,
+                                                   footprint_step_m)))
         {
             --farthest;
         }
@@ -315,7 +370,9 @@ bool smoothing_keeps_corners_roundable_(const Path& path, std::size_t i,
 // 输入/输出：path 原地更新（首尾点不变）；weight 为平滑权重 (0, 0.5]；
 // 收敛方式为固定轮数的定点迭代，每轮"读旧写新"，未收敛即停。
 void smooth_(Path& path, const TerrainGrid& grid, int iterations,
-             double weight, double sample_step, int margin, double corner_radius)
+             double weight, double sample_step, int margin, double corner_radius,
+             double vehicle_length_m, double vehicle_width_m,
+             double footprint_step_m)
 {
     // 外层：平滑迭代轮数，由配置指定（smoothing_iterations）。
     // 每轮基于上一轮结果整条重建，校验失败的点原地保留、下一轮仍可继续移动。
@@ -344,8 +401,12 @@ void smooth_(Path& path, const TerrainGrid& grid, int iterations,
             // 三重安全校验：prev->candidate 与 candidate->next 两段直线余量，
             // 加上受影响的相邻折角仍可被 corner_radius 圆弧替换；
             // 全部通过才接受移动，否则该点本轮保持原位。
-            if (line_is_clear_(grid, prev, candidate, sample_step, margin)
-                && line_is_clear_(grid, candidate, next, sample_step, margin)
+            if (line_is_clear_(grid, prev, candidate, sample_step, margin,
+                               vehicle_length_m, vehicle_width_m,
+                               footprint_step_m)
+                && line_is_clear_(grid, candidate, next, sample_step, margin,
+                                  vehicle_length_m, vehicle_width_m,
+                                  footprint_step_m)
                 && smoothing_keeps_corners_roundable_(path, i, candidate,
                                                       corner_radius))
             {
@@ -368,7 +429,9 @@ void smooth_(Path& path, const TerrainGrid& grid, int iterations,
 // 障碍余量时保留原折点，由跟踪端弯道限速兜底；unrounded_count 统计
 // 因运动学或余量原因未能圆弧化的真实折角数。
 Path round_corners_(const Path& path, const TerrainGrid& grid, double radius,
-                    double sample_step, int margin, int& unrounded_count)
+                    double sample_step, int margin, int& unrounded_count,
+                    double vehicle_length_m, double vehicle_width_m,
+                    double footprint_step_m)
 {
     unrounded_count = 0;
     // 路径不足三点（无内部折角可圆化）或未启用曲率约束时原样返回。
@@ -387,7 +450,9 @@ Path round_corners_(const Path& path, const TerrainGrid& grid, double radius,
         // 生效条件：几何可行 + 折角非近似直线（|sweep| >= 1e-6 弧度）
         // + 圆弧全程满足障碍余量。
         if (arc.valid && std::abs(arc.sweep) >= 1e-6
-            && arc_is_clear_(grid, arc, sample_step, margin))
+            && arc_is_clear_(grid, arc, sample_step, margin,
+                             vehicle_length_m, vehicle_width_m,
+                             footprint_step_m))
         {
             // 先放入切入点（来向直段与圆弧的切点）。
             result.push_back(arc.entry);
@@ -457,6 +522,28 @@ Path resample_(const Path& path, double step_m)
     return result;
 }
 
+void remove_near_duplicate_points_(Path& path, double minimum_spacing_m)
+{
+    if (path.size() < 3 || minimum_spacing_m <= 0.0)
+        return;
+
+    Path filtered;
+    filtered.reserve(path.size());
+    filtered.push_back(path.front());
+    const double minimum_spacing_squared =
+        minimum_spacing_m * minimum_spacing_m;
+
+    for (std::size_t i = 1; i + 1 < path.size(); ++i)
+    {
+        const double dx = path[i].x - filtered.back().x;
+        const double dy = path[i].y - filtered.back().y;
+        if (dx * dx + dy * dy >= minimum_spacing_squared)
+            filtered.push_back(path[i]);
+    }
+    filtered.push_back(path.back());
+    path.swap(filtered);
+}
+
 // 按相邻点差分重算内部点切线方向；首尾点航向保持不变。
 // 航向为弧度，atan2(dy, dx) 约定（X 轴为零、逆时针为正）；内部点 i 取
 // 前后邻点连线方向（中央差分），比单侧差分更平滑、对采样间距不敏感。
@@ -471,6 +558,132 @@ void recompute_yaw_(Path& path)
         if (std::hypot(dx, dy) > 1e-9)
             path[i].yaw = std::atan2(dy, dx);
     }
+}
+
+double minimum_clearance_m_(const Path& path, const TerrainGrid& grid)
+{
+    if (path.empty() || grid.empty() || grid.resolution_m <= 0.0)
+        return 0.0;
+
+    constexpr double kSearchRadiusM = 32.0;
+    const int search_radius_cells = static_cast<int>(std::ceil(
+        kSearchRadiusM / grid.resolution_m));
+    const double half_cell = 0.5 * grid.resolution_m;
+    double minimum_clearance = std::numeric_limits<double>::infinity();
+
+    for (const PathPoint& point : path)
+    {
+        int col = 0;
+        int row = 0;
+        if (!grid.worldToGrid(point.x, point.y, col, row))
+            return 0.0;
+
+        const int first_row = std::max(0, row - search_radius_cells);
+        const int last_row = std::min(grid.rows - 1, row + search_radius_cells);
+        const int first_col = std::max(0, col - search_radius_cells);
+        const int last_col = std::min(grid.cols - 1, col + search_radius_cells);
+
+        for (int candidate_row = first_row;
+             candidate_row <= last_row; ++candidate_row)
+        {
+            for (int candidate_col = first_col;
+                 candidate_col <= last_col; ++candidate_col)
+            {
+                if (grid.isTraversable(candidate_row, candidate_col))
+                    continue;
+
+                double obstacle_x = 0.0;
+                double obstacle_y = 0.0;
+                grid.gridToWorld(candidate_row, candidate_col,
+                                 obstacle_x, obstacle_y);
+                const double dx = std::max(
+                    std::abs(point.x - obstacle_x) - half_cell, 0.0);
+                const double dy = std::max(
+                    std::abs(point.y - obstacle_y) - half_cell, 0.0);
+                minimum_clearance = std::min(
+                    minimum_clearance, std::hypot(dx, dy));
+            }
+        }
+    }
+
+    return std::isfinite(minimum_clearance) ? minimum_clearance : -1.0;
+}
+
+double footprint_clearance_m_(const Path& path, const TerrainGrid& grid,
+                              double length_m, double width_m,
+                              double sample_step_m)
+{
+    if (path.empty() || grid.empty() || length_m <= 0.0 || width_m <= 0.0)
+        return -1.0;
+
+    const double step = std::clamp(sample_step_m, 0.2, grid.resolution_m);
+    const int longitudinal_steps = std::max(1, static_cast<int>(std::ceil(
+        length_m / step)));
+    const int lateral_steps = std::max(1, static_cast<int>(std::ceil(
+        width_m / step)));
+    const double half_length = 0.5 * length_m;
+    const double half_width = 0.5 * width_m;
+    const double half_cell = 0.5 * grid.resolution_m;
+    double minimum_clearance = std::numeric_limits<double>::infinity();
+
+    for (const PathPoint& point : path)
+    {
+        const double cos_yaw = std::cos(point.yaw);
+        const double sin_yaw = std::sin(point.yaw);
+        for (int longitudinal = 0; longitudinal <= longitudinal_steps;
+             ++longitudinal)
+        {
+            const double forward = -half_length + length_m
+                * static_cast<double>(longitudinal)
+                / static_cast<double>(longitudinal_steps);
+            for (int lateral = 0; lateral <= lateral_steps; ++lateral)
+            {
+                const double side = -half_width + width_m
+                    * static_cast<double>(lateral)
+                    / static_cast<double>(lateral_steps);
+                const double sample_x = point.x + forward * cos_yaw
+                    - side * sin_yaw;
+                const double sample_y = point.y + forward * sin_yaw
+                    + side * cos_yaw;
+                int col = 0;
+                int row = 0;
+                if (!grid.worldToGrid(sample_x, sample_y, col, row))
+                    return 0.0;
+                if (!grid.isTraversable(row, col))
+                    return 0.0;
+
+                const int search_radius_cells = static_cast<int>(std::ceil(
+                    32.0 / grid.resolution_m));
+                const int first_row = std::max(0, row - search_radius_cells);
+                const int last_row = std::min(grid.rows - 1,
+                                              row + search_radius_cells);
+                const int first_col = std::max(0, col - search_radius_cells);
+                const int last_col = std::min(grid.cols - 1,
+                                              col + search_radius_cells);
+                for (int obstacle_row = first_row; obstacle_row <= last_row;
+                     ++obstacle_row)
+                {
+                    for (int obstacle_col = first_col;
+                         obstacle_col <= last_col; ++obstacle_col)
+                    {
+                        if (grid.isTraversable(obstacle_row, obstacle_col))
+                            continue;
+                        double obstacle_x = 0.0;
+                        double obstacle_y = 0.0;
+                        grid.gridToWorld(obstacle_row, obstacle_col,
+                                         obstacle_x, obstacle_y);
+                        const double dx = std::max(
+                            std::abs(sample_x - obstacle_x) - half_cell, 0.0);
+                        const double dy = std::max(
+                            std::abs(sample_y - obstacle_y) - half_cell, 0.0);
+                        minimum_clearance = std::min(
+                            minimum_clearance, std::hypot(dx, dy));
+                    }
+                }
+            }
+        }
+    }
+    return std::isfinite(minimum_clearance) ? minimum_clearance : -1.0;
 }
 } // namespace
 
@@ -520,13 +733,23 @@ Path PathOptimizer::optimize(const Path& raw_path, const TerrainGrid& grid,
     // -> 固定步长重采样 -> 差分重算航向。每步以上步输出为输入，
     // 碰撞/余量校验贯穿前三步。
     Path optimized = shortcut_(raw_path, grid, config.shortcut_max_distance_m,
-                               sample_step, margin, corner_radius);
+                               sample_step, margin, corner_radius,
+                               config.vehicle_overall_length_m,
+                               config.vehicle_overall_width_m,
+                               config.vehicle_footprint_sample_step_m);
     smooth_(optimized, grid, config.smoothing_iterations,
-            config.smoothing_weight, sample_step, margin, corner_radius);
+            config.smoothing_weight, sample_step, margin, corner_radius,
+            config.vehicle_overall_length_m,
+            config.vehicle_overall_width_m,
+            config.vehicle_footprint_sample_step_m);
     int unrounded_corners = 0;
     optimized = round_corners_(optimized, grid, corner_radius, sample_step,
-                               margin, unrounded_corners);
+                               margin, unrounded_corners,
+                               config.vehicle_overall_length_m,
+                               config.vehicle_overall_width_m,
+                               config.vehicle_footprint_sample_step_m);
     optimized = resample_(optimized, resample_step);
+    remove_near_duplicate_points_(optimized, 0.1);
     recompute_yaw_(optimized);
 
     // 输出运动学校验信息：重采样后路径的最大离散曲率应不超过 1/corner_radius；
@@ -541,9 +764,17 @@ Path PathOptimizer::optimize(const Path& raw_path, const TerrainGrid& grid,
         max_curvature = std::max(max_curvature,
             menger_curvature_(optimized[i - 1], optimized[i], optimized[i + 1]));
     }
+    const double minimum_clearance = minimum_clearance_m_(optimized, grid);
+    const double footprint_clearance = footprint_clearance_m_(
+        optimized, grid, config.vehicle_overall_length_m,
+        config.vehicle_overall_width_m,
+        config.vehicle_footprint_sample_step_m);
     std::cout << "[optimizer] kinematic check: kappa_plan=" << kappa_plan
               << " 1/m (R=" << corner_radius << " m)"
               << ", max discrete curvature=" << max_curvature << " 1/m"
-              << ", unrounded corners=" << unrounded_corners << std::endl;
+              << ", unrounded corners=" << unrounded_corners
+              << ", minimum clearance=" << minimum_clearance << " m"
+              << ", footprint clearance=" << footprint_clearance << " m"
+              << std::endl;
     return optimized;
 }

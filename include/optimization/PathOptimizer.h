@@ -19,9 +19,9 @@ struct PathOptimizerConfig
 {
     double shortcut_max_distance_m = 200.0; // 视线捷径单段最大跨度（米），限制最坏搜索量；跨度再大也不合并，防止一次直线校验覆盖过长线段。
     double clearance_sample_step_m = 1.0;   // 直线可行性检查的采样步长（米）；0 表示取栅格分辨率的一半。实际值会被夹紧到 [0.2, 栅格分辨率] 区间。
-    int clearance_margin_cells = 1;         // 直线与障碍保持的栅格余量圈数（1 = 八邻域空旷，与规划器一致）；等价于把障碍层膨胀 margin 圈后再查询单点。0 表示只查采样点所在栅格。
-    int smoothing_iterations = 3;           // 平滑迭代次数；0 表示只做捷径不平滑。每轮迭代对全部内部点各生成一次候选移动，收敛速度与轮数成正比。
-    double smoothing_weight = 0.25;         // 平滑位移权重，取值 (0, 0.5]，越大转角越圆；候选点 = w*prev + (1-2w)*current + w*next 的加权平均，w=0.5 时退化为两邻点中点。
+    int clearance_margin_cells = 2;         // 直线与障碍保持的栅格余量圈数（1 = 八邻域空旷，与规划器一致）；等价于把障碍层膨胀 margin 圈后再查询单点。0 表示只查采样点所在栅格。
+    int smoothing_iterations = 7;           // 平滑迭代次数；0 表示只做捷径不平滑。每轮迭代对全部内部点各生成一次候选移动，收敛速度与轮数成正比。
+    double smoothing_weight = 0.30;         // 平滑位移权重，取值 (0, 0.5]，越大转角越圆；候选点 = w*prev + (1-2w)*current + w*next 的加权平均，w=0.5 时退化为两邻点中点。
     double resample_step_m = 2.0;           // 平滑后重采样步长（米），恢复稠密参考点供跟踪；0 表示取栅格分辨率。跟踪的最近点搜索依赖稠密点随车推进。
     // ===== 运动学参数（与跟踪模块 TrackingConfig::geometry 同源）=====
     // 设计文档要求规划与控制共用同一套车辆参数；两处独立维护，修改任一处
@@ -30,6 +30,9 @@ struct PathOptimizerConfig
     double max_front_wheel_angle_rad = 23.0 * (3.14159265358979323846 / 180.0); // 最大前轮角（弧度），默认 23 度换算而来；用于推导最小转弯半径。由轴距 2.76 m / 23 度推导 R_min 约 6.5 m。
     double min_turning_radius_m = 0.0;      // 最小转弯半径（米）；0 表示由轴距和最大前轮角推导 R = L/tan(delta)。显式配置时优先生效。
     double curvature_safety_factor = 0.8;   // 规划曲率上限系数：kappa_plan = 系数 / R_min，给跟踪控制留余量；0 表示不启用曲率约束。圆弧倒圆半径 R_plan = R_min/系数（比物理最小半径更保守），即 6.5/0.8 约 8.1 m（kappa_plan 约 0.123 1/m）。
+    double vehicle_overall_length_m = 4.75; // EchoSim 月球车碰撞包络长度（米）。
+    double vehicle_overall_width_m = 1.98;  // EchoSim 月球车碰撞包络宽度（米）。
+    double vehicle_footprint_sample_step_m = 0.5; // 车体矩形碰撞检查采样步长（米）。
 };
 
 // 路径优化器：消费模块一（全局路径规划）的原始 Path，输出给模块三（轨迹跟踪）的 Path。

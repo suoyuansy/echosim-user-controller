@@ -3,7 +3,7 @@
 #include "PathTypes.h"
 #include "TaskConfig.h"
 
-// 文件功能：封装 EchoSim 消息系统初始化、车辆状态订阅、控制发布和停车收尾。
+// 封装 EchoSim 消息系统初始化、车辆状态订阅、控制发布和停车收尾。
 class EchoSimRuntime
 {
 public:

@@ -89,14 +89,16 @@ TaskConfig makeDefaultTaskConfig()
     config.planner.method = GlobalPlannerMethod::BidirectionalAStar;
     config.planner.cost_weight = 10.0;
 
-    config.tracking.method = TrackerMethod::Stanley;
+    config.tracking.method = TrackerMethod::PurePursuit;
     config.tracking.geometry.wheelbase_m = 2.76;
     config.tracking.geometry.front_axle_offset_m = 1.41;
     config.tracking.geometry.rear_axle_offset_m = 1.35;
     config.tracking.geometry.max_front_wheel_angle_rad = 23.0 * kDegToRad;
     config.tracking.lqr_longitudinal_kp = 0.8;
+
+
     config.enable_debug_output = true;
-    config.visualization_sample_interval_sec = 2.0;
-    config.control_log_interval = 100;
+    config.visualization_sample_interval_sec = 1.0;
+    config.control_log_interval = 10;
     return config;
 }

@@ -13,7 +13,7 @@
 #include <opencv2/core/mat.hpp>
 #endif
 
-// 文件功能：在可视化开关打开时异步绘制局部跟踪窗口，并保存最终轨迹结果。
+// 在可视化开关打开时异步绘制局部跟踪窗口，并保存最终轨迹结果。
 class TrajectoryVisualizer
 {
 public:
@@ -62,7 +62,7 @@ private:
     Pose2D goal_; // 任务终点。
     std::string output_directory_; // 可视化输出目录。
     bool enable_visualization_ = false; // 是否启用可视化。
-    double sample_interval_sec_ = 2.0; // 实际轨迹采样间隔。
+    double sample_interval_sec_ = 5.0; // 实际轨迹采样间隔。
     std::vector<Pose2D> actual_points_; // 完整历史实际轨迹。
     double last_sample_time_sec_ = 0.0; // 最近一次采样时间。
     bool has_sample_time_ = false; // 是否已经采样过。

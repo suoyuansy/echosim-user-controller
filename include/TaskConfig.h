@@ -21,8 +21,8 @@ struct TaskConfig
     double start_position_tolerance_m = 2.0; // 起点位置校验容差。
     double start_yaw_tolerance_rad = 15.0 * 3.14159265358979323846 / 180.0; // 起点航向校验容差。
     bool enable_debug_output = true; // 调试模式开关；比赛模式设为 false 时不输出任何文件。
-    double visualization_sample_interval_sec = 2.0; // 实际轨迹采样间隔。
-    std::size_t control_log_interval = 200; // 成功发布控制后的日志周期。
+    double visualization_sample_interval_sec = 1.0; // 实际轨迹采样间隔。
+    std::size_t control_log_interval = 10; // 成功发布控制后的日志周期。
     int gear_mode = 4; // EchoSim 前进挡枚举值。
 };
 

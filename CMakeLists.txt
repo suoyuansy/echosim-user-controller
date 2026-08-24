@@ -46,6 +46,21 @@ set(USER_CONTROLLER_SOURCES
 
 add_executable(UserControllerTest ${USER_CONTROLLER_SOURCES})
 
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(PathTrackerSelfTest
+        tests/PathTrackerSelfTest.cpp
+        src/PathTracker.cpp
+    )
+    target_include_directories(PathTrackerSelfTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+    if(MSVC)
+        target_compile_options(PathTrackerSelfTest PRIVATE /utf-8)
+    endif()
+    add_test(NAME PathTrackerSelfTest COMMAND PathTrackerSelfTest)
+endif()
+
 target_compile_definitions(UserControllerTest PRIVATE
     ECHOSIM_USE_ECHOSIM_SDK
     ECHOSIM_USE_OPENCV

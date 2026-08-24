@@ -1,4 +1,4 @@
-// 文件功能：实现 EchoSim 状态订阅、三种跟踪控制发布、日志和到点停车。
+// 实现 EchoSim 状态订阅、三种跟踪控制发布、日志和到点停车。
 #include "EchoSimRuntime.h"
 
 #include "PathTracker.h"
@@ -16,8 +16,8 @@
 
 namespace
 {
-constexpr double kLoopDtSec = 0.01; // 控制循环仿真时间步长，单位为秒。
-constexpr int kLoopPeriodMs = 10; // 状态订阅超时和循环休眠时间，单位为毫秒。
+constexpr double kLoopDtSec = 0.1; // 控制循环仿真时间步长，单位为秒。
+constexpr int kLoopPeriodMs = 100; // 状态订阅超时和循环休眠时间，单位为毫秒。
 constexpr double kPi = 3.14159265358979323846; // 圆周率常量。
 constexpr double kDegToRad = kPi / 180.0; // 角度转弧度的比例系数。
 constexpr double kRadToDeg = 180.0 / kPi; // 弧度转角度的比例系数。
@@ -171,6 +171,7 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
     bool start_checked = false; // 是否已完成起点状态检查。
     bool stop_published = false; // 是否已发布终点停车指令。
     bool have_state = false; // 是否至少接收过一帧有效状态。
+    std::size_t progress_index = 0; // 当前路径进度，只允许向前搜索。
     // 首帧状态到来前持续发送安全停车控制，避免仿真端等待控制帧而不推进状态反馈。
     sim_msg::Control last_control; // 最近一次成功发布的控制消息。
     bool have_last_control = true; // 初始停车控制可以在状态到来前复用。
@@ -230,9 +231,12 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
             start_checked = true;
         }
 
-        const std::size_t reference_index = tracker.findNearestPathPoint(path, state);
-        const PathPoint& reference = path[reference_index];
-        const TrackingCommand command = tracker.calculate(path, state);
+        const TrackingCommand command = tracker.calculate(
+            path, state, progress_index);
+        progress_index = command.nearest_path_index;
+        const std::size_t nearest_index = command.nearest_path_index;
+        const std::size_t target_index = command.target_path_index;
+        const PathPoint& reference = path[target_index];
         const double actual_speed = std::hypot(state.vx, state.vy);
         sim_msg::Control control;
         if (config.tracking.method == TrackerMethod::Lqr)
@@ -258,7 +262,7 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
             have_last_control = true;
             ++publish_count;
         }
-        visualizer.update(state, reference_index, control_time_sec);
+        visualizer.update(state, target_index, control_time_sec);
         visualizer.pumpWindow();
 
         if (control_published && config.control_log_interval > 0
@@ -266,7 +270,8 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
         {
             std::cout << std::fixed << std::setprecision(3)
                       << "[track] publish_count=" << publish_count
-                      << " ref_index=" << reference_index
+                      << " nearest_index=" << nearest_index
+                      << " target_index=" << target_index
                       << " reference=(x=" << reference.x
                       << ",y=" << reference.y
                       << ",yaw_rad=" << reference.yaw << ')'

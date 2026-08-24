@@ -1,4 +1,4 @@
-// 文件功能：实现地形缓存加载、TerrainService 建图、全局规划和路径文件/图片输出。
+// 实现地形缓存加载、TerrainService 建图、全局规划和路径文件/图片输出。
 #include "PlanningPipeline.h"
 
 #include "GlobalPlanner.h"

@@ -1,4 +1,4 @@
-// 文件功能：构造默认配置，编排规划流程和 EchoSim 运行时，并统一处理异常。
+// 构造默认配置，编排规划流程和 EchoSim 运行时，并统一处理异常。
 #include "EchoSimRuntime.h"
 #include "PlanningPipeline.h"
 #include "TaskConfig.h"
@@ -8,7 +8,7 @@
 
 namespace
 {
-// 功能：输出任务、调试模式和控制日志周期，便于确认当前运行配置。
+// 输出任务、调试模式和控制日志周期，便于确认当前运行配置。
 void printTaskConfiguration(const TaskConfig& config)
 {
     std::cout << std::fixed << std::setprecision(3)

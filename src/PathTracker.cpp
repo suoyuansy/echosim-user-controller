@@ -43,23 +43,25 @@ PathTracker::PathTracker(TrackingConfig config)
 
 // 依据配置统一选择跟踪算法。
 TrackingCommand PathTracker::calculate(const Path& path,
-                                       const VehicleState2D& state) const
+                                       const VehicleState2D& state,
+                                       std::size_t progress_index) const
 {
     switch (config_.method)
     {
     case TrackerMethod::PurePursuit:
-        return calculatePurePursuit(path, state);
+        return calculatePurePursuit(path, state, progress_index);
     case TrackerMethod::Lqr:
-        return calculateLqr(path, state);
+        return calculateLqr(path, state, progress_index);
     case TrackerMethod::Stanley:
     default:
-        return calculateStanley(path, state);
+        return calculateStanley(path, state, progress_index);
     }
 }
 
 // 生成所有横向控制器共用的路径状态。
 TrackingCommand PathTracker::make_base_command_(const Path& path,
-                                              const VehicleState2D& state) const
+                                               const VehicleState2D& state,
+                                               std::size_t progress_index) const
 {
     TrackingCommand command;
     if (path.empty())
@@ -67,7 +69,10 @@ TrackingCommand PathTracker::make_base_command_(const Path& path,
         command.reached_goal = true;
         return command;
     }
-    const std::size_t nearest = find_nearest_index_(path, state.x, state.y);
+    const std::size_t nearest = find_nearest_index_(
+        path, state.x, state.y, progress_index);
+    command.nearest_path_index = nearest;
+    command.target_path_index = nearest;
     command.remaining_path_distance_m = remaining_distance_(path, nearest);
     const double distance_to_goal = std::hypot(
         path.back().x - state.x, path.back().y - state.y);
@@ -88,13 +93,15 @@ TrackingCommand PathTracker::make_base_command_(const Path& path,
 
 // 搜索距离车辆最近的路径点。
 std::size_t PathTracker::find_nearest_index_(const Path& path, double x,
-                                           double y) const
+                                            double y,
+                                            std::size_t progress_index) const
 {
     if (path.empty())
         return 0;
-    std::size_t nearest = 0;
+    const std::size_t first_index = std::min(progress_index, path.size() - 1);
+    std::size_t nearest = first_index;
     double nearest_distance = std::numeric_limits<double>::infinity();
-    for (std::size_t index = 0; index < path.size(); ++index)
+    for (std::size_t index = first_index; index < path.size(); ++index)
     {
         const double distance = std::hypot(path[index].x - x,
                                            path[index].y - y);
@@ -109,9 +116,10 @@ std::size_t PathTracker::find_nearest_index_(const Path& path, double x,
 
 // 返回公开的最近参考点序号。
 std::size_t PathTracker::findNearestPathPoint(const Path& path,
-                                              const VehicleState2D& state) const
+                                              const VehicleState2D& state,
+                                              std::size_t progress_index) const
 {
-    return find_nearest_index_(path, state.x, state.y);
+    return find_nearest_index_(path, state.x, state.y, progress_index);
 }
 
 // 计算最近路径点到终点的折线长度。
@@ -139,12 +147,13 @@ double PathTracker::clamp_steer_(double angle_rad) const
 
 // 使用前视点和轴距计算纯跟踪转角。
 TrackingCommand PathTracker::calculatePurePursuit(
-    const Path& path, const VehicleState2D& state) const
+    const Path& path, const VehicleState2D& state,
+    std::size_t progress_index) const
 {
-    TrackingCommand command = make_base_command_(path, state);
+    TrackingCommand command = make_base_command_(path, state, progress_index);
     if (path.empty() || command.reached_goal)
         return command;
-    const std::size_t nearest = find_nearest_index_(path, state.x, state.y);
+    const std::size_t nearest = command.nearest_path_index;
     const double lookahead = std::max(
         0.5, config_.pure_pursuit_lookahead_m
             + config_.pure_pursuit_lookahead_gain * planar_speed_(state));
@@ -156,6 +165,7 @@ TrackingCommand PathTracker::calculatePurePursuit(
                                   path[target_index + 1].y - path[target_index].y);
         ++target_index;
     }
+    command.target_path_index = target_index;
     const double dx = path[target_index].x - state.x;
     const double dy = path[target_index].y - state.y;
     const double target_distance = std::max(std::hypot(dx, dy), 0.5);
@@ -167,12 +177,13 @@ TrackingCommand PathTracker::calculatePurePursuit(
 
 // 使用横向误差和航向误差计算 Stanley 转角。
 TrackingCommand PathTracker::calculateStanley(
-    const Path& path, const VehicleState2D& state) const
+    const Path& path, const VehicleState2D& state,
+    std::size_t progress_index) const
 {
-    TrackingCommand command = make_base_command_(path, state);
+    TrackingCommand command = make_base_command_(path, state, progress_index);
     if (path.empty() || command.reached_goal)
         return command;
-    const std::size_t nearest = find_nearest_index_(path, state.x, state.y);
+    const std::size_t nearest = command.nearest_path_index;
     const PathPoint& target = path[nearest];
     const double heading_error = normalize_angle_(target.yaw - state.yaw);
     const double cross_track_error = signed_cross_track_error_(target, state);
@@ -184,12 +195,13 @@ TrackingCommand PathTracker::calculateStanley(
 
 // 使用 [横向误差、航向误差、速度误差] 计算简化 LQR 输出。
 TrackingCommand PathTracker::calculateLqr(
-    const Path& path, const VehicleState2D& state) const
+    const Path& path, const VehicleState2D& state,
+    std::size_t progress_index) const
 {
-    TrackingCommand command = make_base_command_(path, state);
+    TrackingCommand command = make_base_command_(path, state, progress_index);
     if (path.empty() || command.reached_goal)
         return command;
-    const std::size_t nearest = find_nearest_index_(path, state.x, state.y);
+    const std::size_t nearest = command.nearest_path_index;
     const PathPoint& target = path[nearest];
     const double lateral_error = signed_cross_track_error_(target, state);
     const double heading_error = normalize_angle_(target.yaw - state.yaw);

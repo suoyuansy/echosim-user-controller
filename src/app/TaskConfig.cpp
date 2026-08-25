@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdlib>
 #include <filesystem>
+#include <stdexcept>
 
 namespace
 {
@@ -95,6 +96,7 @@ std::filesystem::path findTerrainRoot_(const std::filesystem::path& project_root
     // 兜底：返回标准工作区布局（Cplusplus_CMake 的兄弟 EchoSim/ 目录）。
     return std::filesystem::absolute(candidates[2]);
 }
+
 } // namespace
 
 // 创建默认任务配置（任务级参数唯一入口）。返回完整 TaskConfig：坐标为世界
@@ -111,14 +113,7 @@ TaskConfig makeDefaultTaskConfig()
     const std::filesystem::path project_root = findProjectRoot_();
 
     TaskConfig config;
-    // 任务起终点（世界坐标，米/弧度）：当前对应 Moon2 场景 Test6（终点刹车
-    // 机制测试：起点取终点前 ~150 m 末段直线上，验证距离刹车、终点前蠕动
-    // 补进与到点停车）；yaw 为 0 表示不约束端点航向。切换测试时同步修改这
-    // 两行（切回 Test1：start={-901.787, -3016.257}、goal={-465.065,
-    // -1269.836}；Test3/Test4 还有必经途经点，见测试定义文件）。
-    config.start = {-541.40, -1398.90, 0.0};
-    config.goal = { -465.065, -1269.836, 0.0};
-    config.goal_z = -73.944; // Test6 active_task.json: route.goal.z。
+    // 起点、终点、目标高度与必经点由启动菜单选中的预置路线覆盖。
     // 地形根：环境变量优先，其次候选路径自动发现；输出固定在项目根下 output/。
     config.terrain_root = findTerrainRoot_(project_root);
     config.output_directory = project_root / "output";
@@ -130,5 +125,62 @@ TaskConfig makeDefaultTaskConfig()
     // 实际轨迹采样间隔 2 秒、每 10 次成功控制发布打一条日志（含义见头文件注释）。
     config.visualization_sample_interval_sec = 2.0;
     config.control_log_interval = 10;
+    return config;
+}
+
+TaskConfig makeTaskConfigForTest(int test_number)
+{
+    if (test_number < 1 || test_number > 6)
+        throw std::runtime_error("test number must be between 1 and 6");
+
+    TaskConfig config = makeDefaultTaskConfig();
+    switch (test_number)
+    {
+    case 1:
+        config.start = {-901.787, -3016.257, 0.0};
+        config.goal = {-465.065, -1269.836, 0.0};
+        config.goal_z = -73.944;
+        break;
+    case 2:
+        config.start = {-2102.775, -69.172, 0.0};
+        config.goal = {-574.245, -505.777, 0.0};
+        config.goal_z = -94.517;
+        break;
+    case 3:
+        config.start = {-3085.401, 1568.098, 0.0};
+        config.goal = {-1884.414, 2441.308, 0.0};
+        config.goal_z = -84.211;
+        config.waypoints = {{-2430.317, 2004.703, 0.0}};
+        // 降低软地形代价对路径长度的放大，避免 A* 为绕开非障碍高代价格
+        // 在必经点引导走廊末端立即折返；硬障碍与两格全局余量不变。
+        config.planner.cost_weight = 2.0;
+        // Test3 的可行走廊在首段转角处较窄。全局搜索仍保留两格余量；
+        // 优化阶段由一格中心线余量叠加完整车体矩形碰撞检查，避免重复膨胀
+        // 阻止本来具有车体净空的曲率连续圆弧。
+        config.optimizer.clearance_margin_cells = 1;
+        break;
+    case 4:
+        config.start = {517.561, 3314.519, 0.0};
+        config.goal = {299.200, 2659.611, 0.0};
+        config.goal_z = -91.662;
+        config.waypoints = {
+            {954.284, 3423.670, 0.0},
+            {1172.645, 2987.065, 0.0},
+            {954.284, 2550.460, 0.0},
+        };
+        break;
+    case 5:
+        config.start = {-3303.762, -2907.106, 0.0};
+        config.goal = {-2211.956, -1051.533, 0.0};
+        config.goal_z = -83.539;
+        break;
+    case 6:
+        config.start = {-541.400, -1398.900, 0.0};
+        config.goal = {-465.065, -1269.836, 0.0};
+        config.goal_z = -73.944;
+        break;
+    default:
+        break;
+    }
     return config;
 }

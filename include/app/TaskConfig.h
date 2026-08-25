@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <vector>
 
 // 文件功能：集中定义任务级配置与三个模块配置的聚合结构。
 // 参数分层（模块隔离）约定：
@@ -25,6 +26,7 @@ struct TaskConfig
     Pose2D start; // 任务起点坐标和航向角。
     Pose2D goal; // 任务终点坐标和航向角。
     double goal_z = 0.0; // 任务契约中的目标世界坐标 Z，单位为米。
+    std::vector<Pose2D> waypoints; // 按任务定义顺序必须经过的中间点。
     // 合法地形根必须包含 level_1m / level_10m / level_100m / level_1000m
     // 切片目录；可被 USER_CONTROLLER_TERRAIN_ROOT / ECHOSIM_TERRAIN_ROOT 环境变量覆盖。
     std::filesystem::path terrain_root; // Moon 地形切片根目录。
@@ -48,6 +50,7 @@ struct TaskConfig
     // 运行时用 ego 实际位姿与 config.start 对比做起点校验（单位分别为米/弧度），
     // 超差说明任务配置与场景不匹配，提前暴露配置错误。
     double start_position_tolerance_m = 2.0; // 起点位置校验容差。
+    double start_path_snap_radius_m = 32.0; // 起点落在膨胀障碍区时寻找安全路径入口的最大半径。
     double start_yaw_tolerance_rad = 15.0 * 3.14159265358979323846 / 180.0; // 起点航向校验容差。
     bool enable_debug_output = true; // 调试模式开关；比赛模式设为 false 时不输出任何文件。
     // 实际轨迹的采样间隔（秒）：TrajectoryVisualizer 按此间隔从控制循环记录
@@ -65,3 +68,7 @@ struct TaskConfig
 // 函数的实现；各模块算法参数（阈值、增益、速度门控等）在模块自己的头文件里
 // 调，不要在本函数或其他模块散落硬编码。
 TaskConfig makeDefaultTaskConfig();
+
+// 按启动菜单选择的 Test 编号加载预置路线表（起点、终点和必经点）。
+// 编号无效时抛出异常。
+TaskConfig makeTaskConfigForTest(int test_number);

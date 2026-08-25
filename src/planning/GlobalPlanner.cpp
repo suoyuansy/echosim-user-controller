@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <iostream>
 #include <queue>
 
 namespace
@@ -64,16 +65,16 @@ double heuristic(int row, int col, int target_row, int target_col,
 // 检查当前栅格及其八邻域，保证路径按八邻域安全规则通过。
 // 要求中心格及周围 8 格全部可通行，等效于给每个路径点留出 1 格（分辨率米）
 // 安全余量：既防止车体擦过障碍，也杜绝相邻两步斜穿两个障碍夹角的情况。
-bool is_clear_with_eight_neighbors_(const TerrainGrid& grid, int row, int col)
+bool is_clear_with_margin_(const TerrainGrid& grid, int row, int col, int margin)
 {
-    for (int row_delta = -1; row_delta <= 1; ++row_delta)
+    margin = std::max(0, margin);
+    for (int row_delta = -margin; row_delta <= margin; ++row_delta)
     {
-        for (int col_delta = -1; col_delta <= 1; ++col_delta)
+        for (int col_delta = -margin; col_delta <= margin; ++col_delta)
         {
             const int neighbor_row = row + row_delta;
             const int neighbor_col = col + col_delta;
-            if (!grid.inBounds(neighbor_row, neighbor_col)
-                || !grid.isTraversable(neighbor_row, neighbor_col))
+            if (!grid.isTraversable(neighbor_row, neighbor_col))
             {
                 return false;
             }
@@ -150,13 +151,23 @@ Path GlobalPlanner::plan(const TerrainGrid& grid, const Pose2D& start,
                          const GlobalPlannerConfig& config) const
 {
     if (config.method == GlobalPlannerMethod::AStar)
-        return planAStar(grid, start, goal, config.cost_weight);
+        return planAStar(grid, start, goal, config.cost_weight,
+                         config.clearance_margin_cells);
 
     // 双向 A* 失败回退到普通 A*：两者可通行性判定一致，回退只在搜索
     // 策略层面兜底。
-    Path path = planBidirectionalAStar(grid, start, goal, config.cost_weight);
+    Path path = planBidirectionalAStar(grid, start, goal, config.cost_weight,
+                                      config.clearance_margin_cells);
     if (path.empty())
-        path = planAStar(grid, start, goal, config.cost_weight);
+        path = planAStar(grid, start, goal, config.cost_weight,
+                         config.clearance_margin_cells);
+    if (path.empty() && config.allow_zero_margin_fallback
+        && config.clearance_margin_cells > 0)
+    {
+        std::cerr << "[planner] safety-margin search disconnected; "
+                     "retrying with traversable center cells" << std::endl;
+        path = planAStar(grid, start, goal, config.cost_weight, 0);
+    }
     return path;
 }
 
@@ -164,7 +175,8 @@ Path GlobalPlanner::plan(const TerrainGrid& grid, const Pose2D& start,
 // 输入 start/goal 为世界坐标（米/弧度），返回世界坐标路径；空路径表示
 // 起终点无效（越界或自身不满足八邻域安全规则）或不存在连通路径。
 Path GlobalPlanner::planAStar(const TerrainGrid& grid, const Pose2D& start,
-                              const Pose2D& goal, double cost_weight) const
+                              const Pose2D& goal, double cost_weight,
+                              int clearance_margin_cells) const
 {
     // 起终点栅格化后先做八邻域安全检查：任一端自身处在障碍贴邻位置
     // 即判为不可解，避免搜索出终点紧贴障碍的路径。
@@ -172,8 +184,10 @@ Path GlobalPlanner::planAStar(const TerrainGrid& grid, const Pose2D& start,
     GridPoint goal_point;
     if (!to_grid_point_(grid, start, start_point)
         || !to_grid_point_(grid, goal, goal_point)
-        || !is_clear_with_eight_neighbors_(grid, start_point.row, start_point.col)
-        || !is_clear_with_eight_neighbors_(grid, goal_point.row, goal_point.col))
+        || !is_clear_with_margin_(grid, start_point.row, start_point.col,
+                                  clearance_margin_cells)
+        || !is_clear_with_margin_(grid, goal_point.row, goal_point.col,
+                                  clearance_margin_cells))
     {
         return {};
     }
@@ -212,7 +226,8 @@ Path GlobalPlanner::planAStar(const TerrainGrid& grid, const Pose2D& start,
             const int next_row = row + neighbor.row;
             const int next_col = col + neighbor.col;
             // 邻居自身及其八邻域必须全部可通行（含安全余量与防斜穿夹角）。
-            if (!is_clear_with_eight_neighbors_(grid, next_row, next_col))
+            if (!is_clear_with_margin_(grid, next_row, next_col,
+                                       clearance_margin_cells))
                 continue;
             const int next_index = next_row * grid.cols + next_col;
             // 边长 = 长度系数(1 或 sqrt(2)) * 分辨率（米）。
@@ -249,15 +264,18 @@ Path GlobalPlanner::planAStar(const TerrainGrid& grid, const Pose2D& start,
 Path GlobalPlanner::planBidirectionalAStar(const TerrainGrid& grid,
                                            const Pose2D& start,
                                            const Pose2D& goal,
-                                           double cost_weight) const
+                                           double cost_weight,
+                                           int clearance_margin_cells) const
 {
     // 与单向 A* 相同的预处理：栅格化 + 起终点八邻域安全检查。
     GridPoint start_point;
     GridPoint goal_point;
     if (!to_grid_point_(grid, start, start_point)
         || !to_grid_point_(grid, goal, goal_point)
-        || !is_clear_with_eight_neighbors_(grid, start_point.row, start_point.col)
-        || !is_clear_with_eight_neighbors_(grid, goal_point.row, goal_point.col))
+        || !is_clear_with_margin_(grid, start_point.row, start_point.col,
+                                  clearance_margin_cells)
+        || !is_clear_with_margin_(grid, goal_point.row, goal_point.col,
+                                  clearance_margin_cells))
     {
         return {};
     }
@@ -327,7 +345,8 @@ Path GlobalPlanner::planBidirectionalAStar(const TerrainGrid& grid,
         {
             const int next_row = row + neighbor.row;
             const int next_col = col + neighbor.col;
-            if (!is_clear_with_eight_neighbors_(grid, next_row, next_col))
+            if (!is_clear_with_margin_(grid, next_row, next_col,
+                                       clearance_margin_cells))
                 continue;
             const int next_index = next_row * grid.cols + next_col;
             const double tentative = current.g + edge_cost_(

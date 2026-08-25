@@ -21,9 +21,9 @@
 namespace
 {
 constexpr double kPi = 3.14159265358979323846;
-// 不可通行栅格的固定融合代价：归一化代价的上限值 1。
-// isTraversable() 以 cost < 1 作为可通行判据，因此该值同时充当"障碍"标记。
+// 硬障碍代价固定为 1；软风险代价最高限制为 0.99，与硬障碍明确区分。
 constexpr float kObstacleCost = 1.0F;
+constexpr double kMaximumSoftCost = 0.99;
 
 // 功能：将浮点数限制到归一化代价范围 0 到 1。
 double clamp01_(double value)
@@ -125,9 +125,9 @@ float TerrainCostmap::fuseCost(double slope_deg,
     if (!is_finite_(slope_deg) || !is_finite_(roughness))
         return kObstacleCost;
 
-    // 坡度或粗糙度任一超过阈值即硬性不可通行（默认坡度上限 18 度远低于
-    // 比赛的俯仰 50 度/侧倾 45 度上限，为跟踪误差留出安全余量）。
-    if (slope_deg > config.slope_limit_deg || roughness > config.roughness_limit)
+    // 只有超过车辆物理硬阈值才不可通行；18 度/0.20 仅作为软风险归一化基准。
+    if (slope_deg > config.hard_slope_limit_deg
+        || roughness > config.hard_roughness_limit)
         return kObstacleCost;
 
     // 用阈值本身作为归一化分母：代价 0 表示平地/平整，趋近 1 表示贴近阈值。
@@ -139,7 +139,7 @@ float TerrainCostmap::fuseCost(double slope_deg,
     // 加权线性融合；两个权重默认各 0.5， clamp 保证权重和超过 1 时结果仍在 0~1。
     const double cost = config.slope_weight * slopeCost
         + config.roughness_weight * roughnessCost;
-    return static_cast<float>(clamp01_(cost));
+    return static_cast<float>(std::clamp(cost, 0.0, kMaximumSoftCost));
 }
 
 #ifdef ECHOSIM_USE_ECHOSIM_SDK
@@ -171,6 +171,8 @@ bool TerrainCostmap::build(terrain::TerrainQueryService& service,
     candidate.resolution_m = config.resolution_m;
     candidate.slope_limit_deg = config.slope_limit_deg;
     candidate.roughness_limit = config.roughness_limit;
+    candidate.hard_slope_limit_deg = config.hard_slope_limit_deg;
+    candidate.hard_roughness_limit = config.hard_roughness_limit;
     candidate.requested_width_m = width;
     candidate.requested_height_m = height;
     candidate.rows = rows;
@@ -182,6 +184,7 @@ bool TerrainCostmap::build(terrain::TerrainQueryService& service,
     candidate.roughness.assign(cellCount, 0.0f);
     candidate.cost.assign(cellCount, kObstacleCost);
     candidate.valid.assign(cellCount, 0);
+    candidate.hard_obstacle.assign(cellCount, 1);
 
     int validCount = 0;
     // 外两层按 query_batch_size（默认 64）把整张地图切成方块，每块调用一次
@@ -244,6 +247,7 @@ bool TerrainCostmap::build(terrain::TerrainQueryService& service,
                 // 融合归一化代价：超阈值栅格在 fuseCost 内被置为障碍值 1。
                 candidate.cost[index] = TerrainCostmap::fuseCost(slope_deg, roughness, config);
                 candidate.valid[index] = 1;
+                candidate.hard_obstacle[index] = candidate.cost[index] >= kObstacleCost ? 1 : 0;
                 ++validCount;
             }
         }
@@ -291,6 +295,8 @@ bool TerrainCostmap::build(terrain::TerrainQueryService& service,
     cropped.resolution_m = candidate.resolution_m;
     cropped.slope_limit_deg = candidate.slope_limit_deg;
     cropped.roughness_limit = candidate.roughness_limit;
+    cropped.hard_slope_limit_deg = candidate.hard_slope_limit_deg;
+    cropped.hard_roughness_limit = candidate.hard_roughness_limit;
     cropped.requested_width_m = candidate.requested_width_m;
     cropped.requested_height_m = candidate.requested_height_m;
     cropped.rows = maxRow - minRow + 1;
@@ -303,6 +309,7 @@ bool TerrainCostmap::build(terrain::TerrainQueryService& service,
     cropped.roughness.assign(croppedCount, 0.0f);
     cropped.cost.assign(croppedCount, kObstacleCost);
     cropped.valid.assign(croppedCount, 0);
+    cropped.hard_obstacle.assign(croppedCount, 1);
 
     // 逐格拷贝五个数据矩阵：源下标 = 候选地图中 (minRow+row, minCol+col)。
     for (int row = 0; row < cropped.rows; ++row)
@@ -316,6 +323,7 @@ bool TerrainCostmap::build(terrain::TerrainQueryService& service,
             cropped.roughness[targetIndex] = candidate.roughness[sourceIndex];
             cropped.cost[targetIndex] = candidate.cost[sourceIndex];
             cropped.valid[targetIndex] = candidate.valid[sourceIndex];
+            cropped.hard_obstacle[targetIndex] = candidate.hard_obstacle[sourceIndex];
         }
     }
 
@@ -472,7 +480,8 @@ bool TerrainCostmap::save_preview_png_(const std::string& path,
         {
             const std::size_t index = grid.index(row, col);
             // 无效栅格（数据空洞）与超阈值栅格（cost>=1）都渲染为白色障碍。
-            const bool obstacle = grid.valid[index] == 0 || grid.cost[index] >= 1.0f;
+            const bool obstacle = grid.valid[index] == 0
+                || grid.hard_obstacle.empty() || grid.hard_obstacle[index] != 0;
             // 可通行栅格：代价 0~1 线性映射为灰度 0~255（0=黑色平坦低代价）。
             image.at<unsigned char>(imageRow, col) = obstacle
                 ? static_cast<unsigned char>(255)
@@ -511,9 +520,13 @@ bool TerrainCostmap::save(const std::string& directory,
                                             grid_.roughness, grid_.rows, grid_.cols);
     const bool validSaved = write_mask_(cache_path_(directory, "terrain_valid.txt").string(),
                                       grid_.valid, grid_.rows, grid_.cols);
+    const bool hardObstacleSaved = write_mask_(
+        cache_path_(directory, "terrain_hard_obstacle.txt").string(),
+        grid_.hard_obstacle, grid_.rows, grid_.cols);
     const bool costSaved = write_matrix_(cache_path_(directory, "costmap.txt").string(),
                                        grid_.cost, grid_.rows, grid_.cols);
-    if (!heightSaved || !slopeSaved || !roughnessSaved || !validSaved || !costSaved)
+    if (!heightSaved || !slopeSaved || !roughnessSaved || !validSaved
+        || !hardObstacleSaved || !costSaved)
         return false;
 
     std::ofstream metadata(cache_path_(directory, "terrain_metadata.json"));
@@ -526,15 +539,17 @@ bool TerrainCostmap::save(const std::string& directory,
     // 否则缓存重载后栅格对齐会出现亚毫米级漂移。
     metadata << std::setprecision(17)
         << "{\n"
-        // 缓存版本号：当前为 4。文件格式或字段语义不兼容变更时必须递增，
+        // v5 增加独立硬障碍层，并将软风险代价限制在 0.99 以下。
         // load() 会拒绝低于该版本的旧缓存（缓存失效机制）。
         // v3 -> v4：坡度阈值默认值由 20 度下调为 18 度（对齐测试标称坡度）。
-        << "  \"version\": 4,\n"
+        << "  \"version\": 5,\n"
         << "  \"origin_x\": " << grid_.origin_x << ",\n"
         << "  \"origin_y\": " << grid_.origin_y << ",\n"
         << "  \"resolution_m\": " << grid_.resolution_m << ",\n"
         << "  \"slope_limit_deg\": " << grid_.slope_limit_deg << ",\n"
         << "  \"roughness_limit\": " << grid_.roughness_limit << ",\n"
+        << "  \"hard_slope_limit_deg\": " << grid_.hard_slope_limit_deg << ",\n"
+        << "  \"hard_roughness_limit\": " << grid_.hard_roughness_limit << ",\n"
         << "  \"requested_width_m\": " << grid_.requested_width_m << ",\n"
         << "  \"requested_height_m\": " << grid_.requested_height_m << ",\n"
         << "  \"rows\": " << grid_.rows << ",\n"
@@ -550,6 +565,7 @@ bool TerrainCostmap::save(const std::string& directory,
         << "    \"slope\": \"terrain_slope.txt\",\n"
         << "    \"roughness\": \"terrain_roughness.txt\",\n"
         << "    \"valid\": \"terrain_valid.txt\",\n"
+        << "    \"hard_obstacle\": \"terrain_hard_obstacle.txt\",\n"
         << "    \"cost\": \"costmap.txt\"\n"
         << "  }\n"
         << "}\n";
@@ -572,6 +588,7 @@ bool TerrainCostmap::hasCache(const std::string& directory)
         "terrain_slope.txt",
         "terrain_roughness.txt",
         "terrain_valid.txt",
+        "terrain_hard_obstacle.txt",
         "costmap.txt"
     };
     for (const char* fileName : kCacheFiles)
@@ -615,6 +632,8 @@ bool TerrainCostmap::load(const std::string& directory,
     double resolution = 0.0;
     double slope_limit_deg = 18.0;
     double roughness_limit = 0.20;
+    double hard_slope_limit_deg = 40.0;
+    double hard_roughness_limit = 0.50;
     double requested_width_m = 0.0;
     double requested_height_m = 0.0;
     int version = 0;
@@ -623,12 +642,14 @@ bool TerrainCostmap::load(const std::string& directory,
     // 版本低于 4 的旧缓存直接拒绝：字段布局已不兼容，强制走重建流程
     // （这是缓存失效的唯一显式机制，参数口径变化靠递增版本号生效）。
     if (!read_json_integer_(metadata, "version", version)
-        || version < 4
+        || version < 5
         || !read_json_number_(metadata, "origin_x", origin_x)
         || !read_json_number_(metadata, "origin_y", origin_y)
         || !read_json_number_(metadata, "resolution_m", resolution)
         || !read_json_number_(metadata, "slope_limit_deg", slope_limit_deg)
         || !read_json_number_(metadata, "roughness_limit", roughness_limit)
+        || !read_json_number_(metadata, "hard_slope_limit_deg", hard_slope_limit_deg)
+        || !read_json_number_(metadata, "hard_roughness_limit", hard_roughness_limit)
         || !read_json_number_(metadata, "requested_width_m", requested_width_m)
         || !read_json_number_(metadata, "requested_height_m", requested_height_m)
         || !read_json_integer_(metadata, "rows", rows)
@@ -644,6 +665,8 @@ bool TerrainCostmap::load(const std::string& directory,
     loaded.resolution_m = resolution;
     loaded.slope_limit_deg = slope_limit_deg;
     loaded.roughness_limit = roughness_limit;
+    loaded.hard_slope_limit_deg = hard_slope_limit_deg;
+    loaded.hard_roughness_limit = hard_roughness_limit;
     loaded.requested_width_m = requested_width_m;
     loaded.requested_height_m = requested_height_m;
     loaded.rows = rows;
@@ -663,6 +686,11 @@ bool TerrainCostmap::load(const std::string& directory,
     // 有效掩码是可通行性判定的一部分，无论是否加载明细都必须读取。
     if (!read_mask_(cache_path_(directory, "terrain_valid.txt").string(),
                   loaded.valid, rows, cols))
+    {
+        return false;
+    }
+    if (!read_mask_(cache_path_(directory, "terrain_hard_obstacle.txt").string(),
+                    loaded.hard_obstacle, rows, cols))
     {
         return false;
     }

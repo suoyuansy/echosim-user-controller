@@ -33,6 +33,8 @@ struct PathOptimizerConfig
     double vehicle_overall_length_m = 4.75; // EchoSim 月球车碰撞包络长度（米）。
     double vehicle_overall_width_m = 1.98;  // EchoSim 月球车碰撞包络宽度（米）。
     double vehicle_footprint_sample_step_m = 0.5; // 车体矩形碰撞检查采样步长（米）。
+    bool reject_unsafe_output = false; // 默认仅报告包络碰撞、残余尖角或曲率超限，不阻止路径进入控制循环；需要严格门控时显式设为 true。
+    double curvature_validation_tolerance = 1.05; // 离散曲率相对规划上限的数值容差。
 };
 
 // 路径优化器：消费模块一（全局路径规划）的原始 Path，输出给模块三（轨迹跟踪）的 Path。
@@ -48,5 +50,8 @@ public:
     // （只读，仅用于直线/圆弧的碰撞与余量校验）；返回路径同为单位的世界坐标。
     Path optimize(const Path& raw_path,
                   const TerrainGrid& grid,
-                  const PathOptimizerConfig& config) const;
+                  const PathOptimizerConfig& config,
+                  const std::vector<Pose2D>& required_waypoints = {},
+                  double waypoint_tolerance_m = 1.0,
+                  const std::vector<Pose2D>& shortcut_anchors = {}) const;
 };

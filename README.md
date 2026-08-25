@@ -55,6 +55,12 @@ cmake -S . -B out\build\x64-Release -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build out\build\x64-Release
 ```
 
+也可在普通 PowerShell 中执行仓库内的便捷脚本：
+
+```powershell
+.\build_release.bat
+```
+
 产物:`out\build\x64-Release\bin\UserController.exe`,构建时自动把
 EchoSim/OpenCV 运行时 DLL 拷贝到 exe 旁边。
 
@@ -72,12 +78,15 @@ EchoSim/OpenCV 运行时 DLL 拷贝到 exe 旁边。
 ## 4. 运行
 
 1. **启动 EchoSim 仿真器**:打开 `EchoSim.exe`,加载竞赛工程
-   `Onsite8_B.prj`,选择场景 **Moon2** 与测试 **Test1–Test5** 之一;
+   `Onsite8_B.prj`,选择场景 **Moon2** 与对应测试;
 2. **启动控制器**(先于测试开始,让它先连上消息总线):在仓库内任意子目录运行
 
    ```powershell
    out\build\x64-Release\bin\UserController.exe
    ```
+
+   程序提示 `Select test (1-6):` 后输入与 EchoSim 场景一致的编号。六组测试的
+   起点、终点和必经点已集中预置在 `src/app/TaskConfig.cpp`，无需运行前改代码。
 
 3. **在 EchoSim 中开始测试**。控制器依次执行:
    加载或构建代价地图 -> 双向 A* 全局规划 -> 路径优化 -> 等到车辆状态后
@@ -94,7 +103,7 @@ EchoSim/OpenCV 运行时 DLL 拷贝到 exe 旁边。
 
 | 参数类别 | 位置 | 说明 |
 |---|---|---|
-| 任务级(起终点、扫描走廊、输出开关) | `src/app/TaskConfig.cpp` 的 `makeDefaultTaskConfig()` | 切换测试(Test1–Test5)时改起终点;Test3/Test4 的必经途经点需同步规划逻辑 |
+| 任务级(六组路线、扫描走廊、输出开关) | `src/app/TaskConfig.cpp` 的 `makeDefaultTaskConfig()` / `makeTaskConfigForTest()` | Test1–Test6 起终点和必经点集中配置，启动时交互选择 |
 | 代价地图参数 | `include/planning/TerrainCostmap.h` | 分辨率、坡度/粗糙度阈值(修改后需递增缓存版本号,见下) |
 | 全局规划参数 | `include/planning/GlobalPlanner.h` | A* 方法、地形代价权重 |
 | 路径优化参数 | `include/optimization/PathOptimizer.h` | 捷径跨度、平滑轮数、曲率上限系数 |
@@ -120,11 +129,24 @@ EchoSim/OpenCV 运行时 DLL 拷贝到 exe 旁边。
   分辨率/阈值等口径变化需递增 `TerrainCostmap.cpp` 写入的缓存版本号
   (`terrain_metadata.json` 的 `version` 字段)使旧缓存失效。
 
+- **软风险与硬障碍分离**:坡度 18°、粗糙度 0.20 是软风险归一化基准，
+  超过后仍可被 A* 以较高代价使用；只有地形无效、坡度超过 40° 或粗糙度
+  超过 0.50 才写入 `hard_obstacle` 并禁止通行。当前缓存格式为 v5。
+- **必经点规划**:规划流水线按起点、必经点、终点分段搜索，并根据必经点
+  两侧的地形 A* 预览自动生成前后引导走廊。引导方向和距离由地形与车辆
+  最小转弯半径计算，不为某个 Test 硬编码；最终路径仍按任务容差检查真实必经点。
+- **安全校验行为**:优化器仍计算最大离散曲率、残余尖角和车体包络净空，
+  但 `reject_unsafe_output` 默认是 `false`。指标超限时打印
+  `[optimizer] unsafe path detected ...; continuing because safety rejection is disabled`
+  并继续进入控制循环，避免仅因优化安全门控导致任务无法启动。若需要严格
+  验证，将 `include/optimization/PathOptimizer.h` 中该参数设为 `true`。
+  地形缓存损坏、全局规划无路径或真实必经点未满足等硬错误仍会终止运行。
+
 ## 6. 输出产物说明(output/,调试模式)
 
 | 文件 | 内容 |
 |---|---|
-| `costmap.txt` 等 `terrain_*.txt` / `terrain_metadata.json` | 代价地图缓存(高程/坡度/粗糙度/代价/有效掩码 + 元数据) |
+| `costmap.txt`、`terrain_valid.txt`、`terrain_hard_obstacle.txt` 等 / `terrain_metadata.json` | v5 代价地图缓存(高程/坡度/粗糙度/软代价/有效掩码/硬障碍掩码 + 元数据) |
 | `terrain_preview.png` | 代价地图灰度预览(亮=高代价) |
 | `global_path.txt` / `global_path_with_yaw.txt` | 模块一产出的原始栅格路径(每行 `x y [yaw]`) |
 | `optimized_path.txt` / `optimized_path_with_yaw.txt` | 模块二优化后路径 |
@@ -135,6 +157,11 @@ EchoSim/OpenCV 运行时 DLL 拷贝到 exe 旁边。
 仿真评分结果由 EchoSim 生成在其工作区
 `EchoSim/data/project/Onsite8_B/Results/<Test>/<Scenario>/` 下,不在本仓库内。
 
+当前规划回归结果（2026-08-25，Moon2 v5 缓存）：Test3 和 Test4 均达到
+`max discrete curvature=0.123 1/m`、`unrounded corners=0`，车体包络净空
+分别为 0.127 m 和 0.126 m，并成功进入控制循环。该数据是规划阶段回归证据，
+不等同于完整仿真评分。
+
 ## 7. 常见问题
 
 | 现象 | 原因与处理 |
@@ -142,6 +169,7 @@ EchoSim/OpenCV 运行时 DLL 拷贝到 exe 旁边。
 | 控制器退出并打印 `[error] ...` | 按出错阶段定位:消息总线初始化(先启动 EchoSim)、地形根发现(检查路径/环境变量)、建图、规划、跟踪 |
 | 建图极慢或内存占用大 | 检查 `scan_bounds` 是否覆盖过大;已有缓存可跳过建图 |
 | `[warning] optimizer 与 tracking 的车辆运动学参数不一致` | 两处车辆参数漂移,同步 `PathOptimizer.h` 与 `PathTracker.h` 的轴距/最大前轮角 |
+| `[optimizer] unsafe path detected ... continuing ...` | 路径曲率、尖角或车体包络指标超限；默认仅告警并继续运行。需要阻断时设置 `reject_unsafe_output=true` |
 | `[state] initial pose differs` | 任务配置起终点与场景实际不符,核对 `makeDefaultTaskConfig()` |
 | `failed to connect runner: 127.0.0.1:9000`(EchoSim 侧) | 执行模式或 runner 配置不匹配,见 EchoSim 使用手册切换本地动画执行 |
 | 仿真无评分/评分 0 | 查阈值、是否碰撞/翻车/卡死/越界/超时,以及是否在容差内到达终点 |

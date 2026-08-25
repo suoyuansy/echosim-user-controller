@@ -257,6 +257,33 @@ bool arc_is_clear_(const TerrainGrid& grid, const CornerArc_& arc,
     return true;
 }
 
+double point_to_arc_distance_(const Pose2D& point, const CornerArc_& arc)
+{
+    const auto point_distance = [&point](const PathPoint& candidate)
+    {
+        return std::hypot(candidate.x - point.x, candidate.y - point.y);
+    };
+    double minimum_distance = std::min(point_distance(arc.entry),
+                                       point_distance(arc.exit));
+    const double point_angle = std::atan2(point.y - arc.center_y,
+                                          point.x - arc.center_x);
+    double angle_offset = point_angle - arc.start_angle;
+    while (angle_offset > kPi)
+        angle_offset -= 2.0 * kPi;
+    while (angle_offset < -kPi)
+        angle_offset += 2.0 * kPi;
+    const bool radial_projection_on_arc = arc.sweep >= 0.0
+        ? angle_offset >= 0.0 && angle_offset <= arc.sweep
+        : angle_offset <= 0.0 && angle_offset >= arc.sweep;
+    if (radial_projection_on_arc)
+    {
+        minimum_distance = std::min(minimum_distance,
+            std::abs(std::hypot(point.x - arc.center_x,
+                                point.y - arc.center_y) - arc.radius));
+    }
+    return minimum_distance;
+}
+
 // 捷径角点可行性：锚点处由来向直段与候选直段构成的折角，必须能用半径
 // corner_radius 的切向圆弧替换（几何放得下，且切角圆弧满足障碍余量——
 // 圆弧向转角内侧切削，处于两条已校验直段之间的区域，必须单独校验）。
@@ -289,6 +316,50 @@ bool shortcut_corner_acceptable_(const Path& result, const Path& raw,
                          vehicle_width_m, footprint_step_m);
 }
 
+bool shortcut_violates_waypoint_(const Path& raw, std::size_t anchor,
+                                 std::size_t farthest,
+                                 const std::vector<std::size_t>& protected_indices,
+                                 const std::vector<Pose2D>& required_waypoints,
+                                 double tolerance_m)
+{
+    const double vx = raw[farthest].x - raw[anchor].x;
+    const double vy = raw[farthest].y - raw[anchor].y;
+    const double length_squared = vx * vx + vy * vy;
+    for (std::size_t waypoint = 0; waypoint < protected_indices.size(); ++waypoint)
+    {
+        if (protected_indices[waypoint] <= anchor
+            || protected_indices[waypoint] >= farthest)
+            continue;
+        return true;
+    }
+    (void)length_squared;
+    (void)required_waypoints;
+    (void)tolerance_m;
+    return false;
+}
+
+bool shortcut_departure_misses_waypoint_(
+    const Path& result, const Path& raw, std::size_t anchor,
+    std::size_t farthest, double corner_radius,
+    const std::vector<std::size_t>& protected_indices,
+    const std::vector<Pose2D>& required_waypoints, double tolerance_m)
+{
+    if (corner_radius <= 0.0 || result.size() < 2)
+        return false;
+    for (std::size_t waypoint = 0; waypoint < protected_indices.size(); ++waypoint)
+    {
+        if (protected_indices[waypoint] != anchor)
+            continue;
+        const CornerArc_ arc = build_corner_arc_(
+            raw[anchor], result[result.size() - 2], raw[farthest],
+            corner_radius, 0.5);
+        return !arc.valid
+            || point_to_arc_distance_(required_waypoints[waypoint], arc)
+                > tolerance_m;
+    }
+    return false;
+}
+
 // 视线捷径：从锚点向后扫描最远的可直线直达且角点运动学可行的点，
 // 跳过中间栅格折线。
 // 输入：raw 为原始栅格路径（世界坐标，米），max_distance_m 为单段最大
@@ -297,7 +368,10 @@ bool shortcut_corner_acceptable_(const Path& result, const Path& raw,
 Path shortcut_(const Path& raw, const TerrainGrid& grid, double max_distance_m,
                double sample_step, int margin, double corner_radius,
                double vehicle_length_m, double vehicle_width_m,
-               double footprint_step_m)
+               double footprint_step_m,
+               const std::vector<std::size_t>& protected_indices,
+               const std::vector<Pose2D>& required_waypoints,
+               double waypoint_tolerance_m)
 {
     Path result;
     result.reserve(raw.size());
@@ -316,7 +390,15 @@ Path shortcut_(const Path& raw, const TerrainGrid& grid, double max_distance_m,
         // 折角的圆弧化可行性（shortcut_corner_acceptable_）任一不过就退一格；
         // 最坏退到 anchor+1，即保留原始相邻段（原折线必可行）。
         while (farthest > anchor + 1
-               && (!line_is_clear_(grid, raw[anchor], raw[farthest],
+               && (shortcut_violates_waypoint_(raw, anchor, farthest,
+                                               protected_indices,
+                                               required_waypoints,
+                                               waypoint_tolerance_m)
+                   || shortcut_departure_misses_waypoint_(
+                       result, raw, anchor, farthest, corner_radius,
+                       protected_indices, required_waypoints,
+                       waypoint_tolerance_m)
+                   || !line_is_clear_(grid, raw[anchor], raw[farthest],
                                    sample_step, margin, vehicle_length_m,
                                    vehicle_width_m, footprint_step_m)
                    || !shortcut_corner_acceptable_(result, raw, anchor, farthest,
@@ -373,7 +455,10 @@ bool smoothing_keeps_corners_roundable_(const Path& path, std::size_t i,
 void smooth_(Path& path, const TerrainGrid& grid, int iterations,
              double weight, double sample_step, int margin, double corner_radius,
              double vehicle_length_m, double vehicle_width_m,
-             double footprint_step_m)
+             double footprint_step_m,
+             const std::vector<std::size_t>& protected_indices,
+             const std::vector<Pose2D>& required_waypoints,
+             double waypoint_tolerance_m)
 {
     // 外层：平滑迭代轮数，由配置指定（smoothing_iterations）。
     // 每轮基于上一轮结果整条重建，校验失败的点原地保留、下一轮仍可继续移动。
@@ -397,6 +482,16 @@ void smooth_(Path& path, const TerrainGrid& grid, int iterations,
                 + weight * next.x;
             candidate.y = weight * prev.y + (1.0 - 2.0 * weight) * current.y
                 + weight * next.y;
+            for (std::size_t waypoint = 0;
+                 waypoint < protected_indices.size(); ++waypoint)
+            {
+                if (protected_indices[waypoint] != i)
+                    continue;
+                // 平滑阶段固定任务必经点的精确位置，把全部容差留给随后
+                // 切向圆弧对顶点的内切偏移，避免两阶段偏移叠加后越过容差圈。
+                candidate.x = required_waypoints[waypoint].x;
+                candidate.y = required_waypoints[waypoint].y;
+            }
             // 航向暂不重算（平滑结束后由 recompute_yaw_ 统一差分）。
             candidate.yaw = current.yaw;
             // 三重安全校验：prev->candidate 与 candidate->next 两段直线余量，
@@ -432,7 +527,10 @@ void smooth_(Path& path, const TerrainGrid& grid, int iterations,
 Path round_corners_(const Path& path, const TerrainGrid& grid, double radius,
                     double sample_step, int margin, int& unrounded_count,
                     double vehicle_length_m, double vehicle_width_m,
-                    double footprint_step_m)
+                    double footprint_step_m,
+                    const std::vector<std::size_t>& protected_indices,
+                    const std::vector<Pose2D>& required_waypoints,
+                    double waypoint_tolerance_m)
 {
     unrounded_count = 0;
     // 路径不足三点（无内部折角可圆化）或未启用曲率约束时原样返回。
@@ -445,15 +543,31 @@ Path round_corners_(const Path& path, const TerrainGrid& grid, double radius,
     // 不可行则保留原折点并计数（由跟踪端弯道限速兜底）。
     for (std::size_t i = 1; i + 1 < path.size(); ++i)
     {
-        // 重建该折角的切向圆弧：切线比例 0.5，保证相邻折角的圆弧互不重叠。
+        // 重建该折角的切向圆弧。允许切线使用相邻段的 90%，以便在必经点
+        // 后的短过渡段上仍能放下最小转弯圆弧；下游离散曲率硬校验会拒绝
+        // 圆弧相互干扰所产生的任何超限结果。
         const CornerArc_ arc = build_corner_arc_(path[i], path[i - 1], path[i + 1],
-                                                 radius, 0.5);
+                                                 radius, 0.9);
+        bool preserves_waypoint = true;
+        for (std::size_t waypoint = 0;
+             waypoint < protected_indices.size(); ++waypoint)
+        {
+            if (protected_indices[waypoint] == i
+                && point_to_arc_distance_(required_waypoints[waypoint], arc)
+                    > waypoint_tolerance_m)
+            {
+                preserves_waypoint = false;
+                break;
+            }
+        }
         // 生效条件：几何可行 + 折角非近似直线（|sweep| >= 1e-6 弧度）
         // + 圆弧全程满足障碍余量。
-        if (arc.valid && std::abs(arc.sweep) >= 1e-6
+        const bool arc_clear = arc.valid && std::abs(arc.sweep) >= 1e-6
             && arc_is_clear_(grid, arc, sample_step, margin,
                              vehicle_length_m, vehicle_width_m,
-                             footprint_step_m))
+                             footprint_step_m);
+        if (arc.valid && preserves_waypoint && std::abs(arc.sweep) >= 1e-6
+            && arc_clear)
         {
             // 先放入切入点（来向直段与圆弧的切点）。
             result.push_back(arc.entry);
@@ -481,7 +595,22 @@ Path round_corners_(const Path& path, const TerrainGrid& grid, double radius,
             // 提示存在依赖跟踪端限速兜底的残余尖角。
             result.push_back(path[i]);
             if (arc.turn >= 1e-6)
+            {
                 ++unrounded_count;
+                std::cerr << "[optimizer] unrounded corner at ("
+                          << path[i].x << ", " << path[i].y << ")"
+                          << ", segment_lengths=("
+                          << distance_(path[i - 1], path[i]) << ", "
+                          << distance_(path[i], path[i + 1]) << ")"
+                          << ", turn_rad=" << arc.turn
+                          << ": geometry_valid="
+                          << (arc.valid ? "true" : "false")
+                          << ", clearance_valid="
+                          << (arc_clear ? "true" : "false")
+                          << ", waypoint_preserved="
+                          << (preserves_waypoint ? "true" : "false")
+                          << std::endl;
+            }
         }
     }
     result.push_back(path.back()); // 尾点（终点）固定保留。
@@ -689,7 +818,10 @@ double footprint_clearance_m_(const Path& path, const TerrainGrid& grid,
 } // namespace
 
 Path PathOptimizer::optimize(const Path& raw_path, const TerrainGrid& grid,
-                             const PathOptimizerConfig& config) const
+                             const PathOptimizerConfig& config,
+                             const std::vector<Pose2D>& required_waypoints,
+                             double waypoint_tolerance_m,
+                             const std::vector<Pose2D>& shortcut_anchors) const
 {
     // 点数过少或地图为空时无法优化，原样返回。
     if (raw_path.size() < 3 || grid.empty())
@@ -733,22 +865,87 @@ Path PathOptimizer::optimize(const Path& raw_path, const TerrainGrid& grid,
     // 优化流水线（顺序固定）：视线捷径删冗余折点 -> 迭代平滑 -> 尖角圆弧化
     // -> 固定步长重采样 -> 差分重算航向。每步以上步输出为输入，
     // 碰撞/余量校验贯穿前三步。
+    std::vector<Pose2D> shortcut_constraints = required_waypoints;
+    shortcut_constraints.insert(shortcut_constraints.end(),
+                                shortcut_anchors.begin(),
+                                shortcut_anchors.end());
+    std::vector<std::size_t> protected_indices;
+    protected_indices.reserve(shortcut_constraints.size());
+    for (const Pose2D& waypoint : shortcut_constraints)
+    {
+        std::size_t closest_index = 0;
+        double closest_distance = std::numeric_limits<double>::infinity();
+        for (std::size_t index = 0; index < raw_path.size(); ++index)
+        {
+            const double distance = std::hypot(raw_path[index].x - waypoint.x,
+                                               raw_path[index].y - waypoint.y);
+            if (distance < closest_distance)
+            {
+                closest_distance = distance;
+                closest_index = index;
+            }
+        }
+        protected_indices.push_back(closest_index);
+    }
+
     Path optimized = shortcut_(raw_path, grid, config.shortcut_max_distance_m,
                                sample_step, margin, corner_radius,
                                config.vehicle_overall_length_m,
                                config.vehicle_overall_width_m,
-                               config.vehicle_footprint_sample_step_m);
+                               config.vehicle_footprint_sample_step_m,
+                               protected_indices, shortcut_constraints,
+                               waypoint_tolerance_m);
+    std::vector<std::size_t> optimized_protected_indices;
+    optimized_protected_indices.reserve(required_waypoints.size());
+    for (const Pose2D& waypoint : required_waypoints)
+    {
+        std::size_t closest_index = 0;
+        double closest_distance = std::numeric_limits<double>::infinity();
+        for (std::size_t index = 0; index < optimized.size(); ++index)
+        {
+            const double distance = std::hypot(optimized[index].x - waypoint.x,
+                                               optimized[index].y - waypoint.y);
+            if (distance < closest_distance)
+            {
+                closest_distance = distance;
+                closest_index = index;
+            }
+        }
+        optimized_protected_indices.push_back(closest_index);
+    }
+    std::vector<std::size_t> smoothing_protected_indices;
+    smoothing_protected_indices.reserve(shortcut_constraints.size());
+    for (const Pose2D& anchor : shortcut_constraints)
+    {
+        std::size_t closest_index = 0;
+        double closest_distance = std::numeric_limits<double>::infinity();
+        for (std::size_t index = 0; index < optimized.size(); ++index)
+        {
+            const double distance = std::hypot(optimized[index].x - anchor.x,
+                                               optimized[index].y - anchor.y);
+            if (distance < closest_distance)
+            {
+                closest_distance = distance;
+                closest_index = index;
+            }
+        }
+        smoothing_protected_indices.push_back(closest_index);
+    }
     smooth_(optimized, grid, config.smoothing_iterations,
             config.smoothing_weight, sample_step, margin, corner_radius,
             config.vehicle_overall_length_m,
             config.vehicle_overall_width_m,
-            config.vehicle_footprint_sample_step_m);
+            config.vehicle_footprint_sample_step_m,
+            smoothing_protected_indices, shortcut_constraints,
+            waypoint_tolerance_m);
     int unrounded_corners = 0;
     optimized = round_corners_(optimized, grid, corner_radius, sample_step,
                                margin, unrounded_corners,
                                config.vehicle_overall_length_m,
                                config.vehicle_overall_width_m,
-                               config.vehicle_footprint_sample_step_m);
+                               config.vehicle_footprint_sample_step_m,
+                               optimized_protected_indices,
+                               required_waypoints, waypoint_tolerance_m);
     optimized = resample_(optimized, resample_step);
     remove_near_duplicate_points_(optimized, 0.1);
     recompute_yaw_(optimized);
@@ -777,5 +974,26 @@ Path PathOptimizer::optimize(const Path& raw_path, const TerrainGrid& grid,
               << ", minimum clearance=" << minimum_clearance << " m"
               << ", footprint clearance=" << footprint_clearance << " m"
               << std::endl;
+    const bool curvature_invalid = kappa_plan > 0.0
+        && max_curvature
+            > kappa_plan * std::max(1.0, config.curvature_validation_tolerance);
+    const bool footprint_invalid = footprint_clearance == 0.0;
+    const bool unsafe_output = curvature_invalid || footprint_invalid
+        || unrounded_corners > 0;
+    if (unsafe_output)
+    {
+        std::cerr << "[optimizer] unsafe path detected: curvature_invalid="
+                  << (curvature_invalid ? "true" : "false")
+                  << ", footprint_collision="
+                  << (footprint_invalid ? "true" : "false")
+                  << ", unrounded_corners=" << unrounded_corners;
+        if (config.reject_unsafe_output)
+        {
+            std::cerr << "; rejecting path" << std::endl;
+            return {};
+        }
+        std::cerr << "; continuing because safety rejection is disabled"
+                  << std::endl;
+    }
     return optimized;
 }

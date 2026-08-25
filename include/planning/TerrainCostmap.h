@@ -34,6 +34,8 @@ struct TerrainCostmapConfig
     double slope_limit_deg = 18.0; // 超过该坡度的栅格不可通行，单位为度。
     // 粗糙度阈值 0.20：剔除高频起伏过大的区域（换算单位见 build() 内计算）。
     double roughness_limit = 0.20; // 超过该粗糙度的栅格不可通行。
+    double hard_slope_limit_deg = 40.0; // 超过该合成坡度才作为物理硬障碍。
+    double hard_roughness_limit = 0.50; // 超过该粗糙度才作为物理硬障碍。
     double slope_weight = 0.5; // 坡度代价融合权重。
     double roughness_weight = 0.5; // 粗糙度代价融合权重。
     // 每次批量查询 64x64=4096 个采样点（模块 1 约定：建图用批量查询，禁逐点
@@ -52,6 +54,8 @@ struct TerrainGrid
     double resolution_m = 2.0; // 当前地图分辨率，单位为米。
     double slope_limit_deg = 18.0; // 当前地图使用的坡度阈值。
     double roughness_limit = 0.20; // 当前地图使用的粗糙度阈值。
+    double hard_slope_limit_deg = 40.0; // 当前地图的坡度硬障碍阈值。
+    double hard_roughness_limit = 0.50; // 当前地图的粗糙度硬障碍阈值。
     double requested_width_m = 0.0; // 原始请求区域宽度，单位为米。
     double requested_height_m = 0.0; // 原始请求区域高度，单位为米。
     int rows = 0; // 栅格行数。
@@ -61,6 +65,7 @@ struct TerrainGrid
     std::vector<float> roughness; // 栅格粗糙度数据。
     std::vector<float> cost; // 归一化融合代价，范围为 0 到 1。
     std::vector<std::uint8_t> valid; // 栅格是否有有效地形查询结果。
+    std::vector<std::uint8_t> hard_obstacle; // 物理不可通行硬障碍掩码。
 
     // 判断地图是否为空。
     bool empty() const { return rows <= 0 || cols <= 0; }
@@ -85,10 +90,10 @@ struct TerrainGrid
     // 越界栅格一律视为不可通行，保证规划器不会越出地图边界。
     bool isTraversable(int row, int col) const
     {
-        if (!inBounds(row, col) || valid.empty() || cost.empty())
+        if (!inBounds(row, col) || valid.empty() || hard_obstacle.empty())
             return false;
         const std::size_t cell_index = index(row, col);
-        return valid[cell_index] != 0 && cost[cell_index] < 1.0F;
+        return valid[cell_index] != 0 && hard_obstacle[cell_index] == 0;
     }
 
     // 将世界坐标转换为最近栅格。

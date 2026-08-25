@@ -11,6 +11,8 @@
 
 #include <iomanip>
 #include <iostream>
+#include <limits>
+#include <stdexcept>
 
 namespace
 {
@@ -34,7 +36,27 @@ void printTaskConfiguration(const TaskConfig& config)
               << "[task] debug_output="
               << (config.enable_debug_output ? "enabled" : "disabled")
               << " tracker_log_interval=" << config.control_log_interval
+              << " waypoints=" << config.waypoints.size()
               << std::endl;
+}
+
+int selectTestNumber()
+{
+    while (true)
+    {
+        std::cout << "Select test (1-6): " << std::flush;
+        int test_number = 0;
+        if (std::cin >> test_number && test_number >= 1 && test_number <= 6)
+        {
+            std::cout << "[task] Test" << test_number << " selected" << std::endl;
+            return test_number;
+        }
+        if (std::cin.eof())
+            throw std::runtime_error("test selection input closed");
+        std::cin.clear();
+        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        std::cerr << "Invalid selection. Enter a number from 1 to 6." << std::endl;
+    }
 }
 } // namespace
 
@@ -46,7 +68,8 @@ int main()
         // 阶段 1/4：makeDefaultTaskConfig() 是所有可调参数的唯一入口，内部完成
         // 项目根（从工作目录向上最多 8 层）与 Moon2 地形根的自动发现，并给出
         // 代价地图/规划器/优化器/跟踪器的全部默认参数。
-        const TaskConfig config = makeDefaultTaskConfig();
+        const int test_number = selectTestNumber();
+        const TaskConfig config = makeTaskConfigForTest(test_number);
         // 先打印配置摘要再进入仿真交互，配置错误可立即暴露。
         printTaskConfiguration(config);
 

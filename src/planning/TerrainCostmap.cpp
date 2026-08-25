@@ -125,7 +125,7 @@ float TerrainCostmap::fuseCost(double slope_deg,
     if (!is_finite_(slope_deg) || !is_finite_(roughness))
         return kObstacleCost;
 
-    // 坡度或粗糙度任一超过阈值即硬性不可通行（默认坡度上限 20 度远低于
+    // 坡度或粗糙度任一超过阈值即硬性不可通行（默认坡度上限 18 度远低于
     // 比赛的俯仰 50 度/侧倾 45 度上限，为跟踪误差留出安全余量）。
     if (slope_deg > config.slope_limit_deg || roughness > config.roughness_limit)
         return kObstacleCost;
@@ -526,9 +526,10 @@ bool TerrainCostmap::save(const std::string& directory,
     // 否则缓存重载后栅格对齐会出现亚毫米级漂移。
     metadata << std::setprecision(17)
         << "{\n"
-        // 缓存版本号：当前为 3。文件格式或字段语义不兼容变更时必须递增，
+        // 缓存版本号：当前为 4。文件格式或字段语义不兼容变更时必须递增，
         // load() 会拒绝低于该版本的旧缓存（缓存失效机制）。
-        << "  \"version\": 3,\n"
+        // v3 -> v4：坡度阈值默认值由 20 度下调为 18 度（对齐测试标称坡度）。
+        << "  \"version\": 4,\n"
         << "  \"origin_x\": " << grid_.origin_x << ",\n"
         << "  \"origin_y\": " << grid_.origin_y << ",\n"
         << "  \"resolution_m\": " << grid_.resolution_m << ",\n"
@@ -612,17 +613,17 @@ bool TerrainCostmap::load(const std::string& directory,
     double origin_x = 0.0;
     double origin_y = 0.0;
     double resolution = 0.0;
-    double slope_limit_deg = 20.0;
+    double slope_limit_deg = 18.0;
     double roughness_limit = 0.20;
     double requested_width_m = 0.0;
     double requested_height_m = 0.0;
     int version = 0;
     int rows = 0;
     int cols = 0;
-    // 版本低于 3 的旧缓存直接拒绝：字段布局已不兼容，强制走重建流程
+    // 版本低于 4 的旧缓存直接拒绝：字段布局已不兼容，强制走重建流程
     // （这是缓存失效的唯一显式机制，参数口径变化靠递增版本号生效）。
     if (!read_json_integer_(metadata, "version", version)
-        || version < 3
+        || version < 4
         || !read_json_number_(metadata, "origin_x", origin_x)
         || !read_json_number_(metadata, "origin_y", origin_y)
         || !read_json_number_(metadata, "resolution_m", resolution)

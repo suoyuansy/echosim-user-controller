@@ -19,10 +19,12 @@
 // 模块间只通过 common/PathTypes.h 交换数据；本结构只含配置，不包含任何运行期状态。
 struct TaskConfig
 {
-    // 起终点均为仿真世界坐标：x/y 单位米，yaw 单位弧度（绕 z 轴，逆时针为正）。
+    // 起终点平面位姿为仿真世界坐标：x/y 单位米，yaw 单位弧度；目标 Z
+    // 单独保存，用于复现评测器 distance_to_goal 的三维欧氏距离。
     // 默认值对应 Moon2 场景 Test1；切换测试时需同步修改（Test3/Test4 还有必经途经点）。
     Pose2D start; // 任务起点坐标和航向角。
     Pose2D goal; // 任务终点坐标和航向角。
+    double goal_z = 0.0; // 任务契约中的目标世界坐标 Z，单位为米。
     // 合法地形根必须包含 level_1m / level_10m / level_100m / level_1000m
     // 切片目录；可被 USER_CONTROLLER_TERRAIN_ROOT / ECHOSIM_TERRAIN_ROOT 环境变量覆盖。
     std::filesystem::path terrain_root; // Moon 地形切片根目录。

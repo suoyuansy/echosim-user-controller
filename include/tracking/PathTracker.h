@@ -7,12 +7,13 @@
 // 文件功能：定义车辆状态、跟踪配置、三种横向跟踪算法和纵向 P 控制接口。
 // 补充说明：三种横向算法为 Pure Pursuit / Stanley / 简化 LQR。本模块内所有
 // 角度均为弧度、距离均为米、速度均为米每秒，与 EchoSim 的度/km/h 换算只在
-// EchoSimRuntime 边界处进行；车辆状态中 x/y/yaw 为世界系，vx/vy/yaw_rate
+// EchoSimRuntime 边界处进行；车辆状态中 x/y/z/yaw 为世界系，vx/vy/yaw_rate
 // 为车体系分量（x 前向、y 左正）。
 struct VehicleState2D
 {
     double x = 0.0; // 车辆世界坐标 X，单位为米。
     double y = 0.0; // 车辆世界坐标 Y，单位为米。
+    double z = 0.0; // 车辆世界坐标 Z，单位为米；仅用于与评测器一致的三维终点判定。
     double yaw = 0.0; // 车辆航向角，单位为弧度。
     double vx = 0.0; // 车体系前向速度，单位为米每秒。
     double vy = 0.0; // 车体系横向速度（左正），单位为米每秒。
@@ -81,6 +82,20 @@ struct TrackingConfig
     double curve_heading_threshold_rad = 20.0 * 3.14159265358979323846 / 180.0; // 判定为弯的累计航向变化阈值。
     double pure_pursuit_slide_sideslip_rad = 5.0 * 3.14159265358979323846 / 180.0; // 侧滑检测阈值：车体系侧偏角超过该值说明后轴开始滑动（评分上限 8°，留余量）。
     double pure_pursuit_slide_speed_mps = 1.0; // 检测到侧滑时的限速值，等残余滑动衰减后再提速。
+    // 途中最低行驶速度 2.0 m/s（2026-08-23 坡道失速修复，由 1.5 上调）：各速度
+    // 门控取小后，若仍远离终点（距离刹车限速高于该值），把目标速度抬回该地板
+    // 值。实测 1.5 m/s 地板不够：Run 20260823_194908 t=455-477 坡道（pitch
+    // 2~3.7°）上侧滑门控把目标压到 1.5 m/s 后，1.5 m/s + 8° 舵角的驱动力不足
+    // 失速倒溜；而事后以 2.5 m/s 小舵角通过同一坡段。2.0 m/s 过 R=8.1 m 弧的
+    // 横向加速度仅 0.49 m/s²，评分安全。终点收尾刹车不受影响。
+    double pure_pursuit_min_moving_speed_mps = 2.0; // 途中目标速度地板值（米/秒），仅终点逼近阶段豁免。
+    // 低速舵角上限（2026-08-23 转角失速修复，由运行时层执行）：|vx| 低于
+    // cap_speed 时前轮角钳到 cap（默认 8°），到 full_speed 线性放开到全舵。
+    // 实测近零速带 14° 舵角起步时刮擦阻力吃掉全部驱动力矩（同上 Run），而直轮
+    // + 0.3 油门即可起步；速度起来后再给足转向不影响过弯（1.5 m/s 以上全舵）。
+    double low_speed_steer_cap_rad = 8.0 * 3.14159265358979323846 / 180.0; // 低速起步阶段的前轮角上限（弧度）。
+    double low_speed_steer_cap_speed_mps = 0.8; // 舵角钳位生效的前向速度上限（米/秒）。
+    double low_speed_steer_full_speed_mps = 1.5; // 舵角完全放开的前向速度（米/秒），与 cap_speed 之间线性过渡。
     double stanley_gain = 1.0; // Stanley 横向误差增益。
     double stanley_min_speed_mps = 0.5; // Stanley 最小计算速度。
     // 巡航速度 4 m/s：这是低抓地后驱车在月壤上能稳定巡航的速度，而不是动力
@@ -96,11 +111,32 @@ struct TrackingConfig
     double lqr_heading_weight = 2.0; // 简化 LQR 航向误差权重。
     double lqr_steer_weight = 1.0; // 简化 LQR 转向输入权重。
     double lqr_speed_input_weight = 1.0; // 简化 LQR 速度输入权重。
-    double lqr_longitudinal_kp = 0.8; // LQR 纵向速度 P 控制增益。
+    double longitudinal_accel_kp = 0.8; // 全部跟踪算法共用的纵向速度-加速度 P 增益。
     double max_acceleration_mps2 = 1.0; // 最大加速度。
     double max_deceleration_mps2 = 1.5; // 最大减速度绝对值。
     double goal_position_tolerance_m = 1.0; // 终点位置容差。
-    double goal_yaw_tolerance_rad = 10.0 * 3.14159265358979323846 / 180.0; // 终点航向容差。
+    bool require_goal_yaw = false; // 是否要求终点航向同时满足；月球车任务 heading_tolerance=0 表示不约束航向。
+    double goal_yaw_tolerance_rad = 10.0 * 3.14159265358979323846 / 180.0; // require_goal_yaw=true 时使用的终点航向容差。
+    // 终点捕获参数：以“剩余距离 / approach_time”形成连续速度上限，4 m/s
+    // 巡航时从约 20 m 外开始降速；进入位置容差后由运行时持续制动，只有在
+    // 圈内低速并保持超过比赛要求的 3 s 后才结束控制器。
+    double goal_approach_time_sec = 5.0; // 终点接近速度时间常数（秒），v_limit=d/t。
+    double goal_stopped_speed_mps = 0.10; // 判定车辆已停稳的平面速度阈值（米/秒）。
+    double goal_hold_duration_sec = 3.2; // 圈内停稳后的连续制动保持时长（秒）。
+    // 终点区刹车与转向（2026-08-23 终点刹车测试修复，Run Test6
+    // 20260823_213755 t=44-48 复盘）：距离刹车限速若按最大减速度 1.5 计算，
+    // 4 m/s 巡航从剩余 ~5 m 才开始压速，SDK 制动响应滞后（指令到建压 ~1 s）
+    // 使实际刹停距离 ~8.5 m，车辆越过终点 3.3 m 停住--越过后最近点即路径
+    // 末端，剩余距离归零，目标速度被压死为 0，控制器进入死寂。终点区改用
+    // 有效减速度（含制动滞后，实测 4 m/s 刹停 8.3 m 反推 a ≈ 0.96），提前
+    // ~2 倍距离开始压速，预期停在终点前 ~1 m 内，再由终点蠕动补进容差。
+    double terminal_brake_decel_mps2 = 0.9; // 终点区距离刹车限速的有效减速度（米每二次方秒）。
+    // 终点区航向保持增益：剩余距离小于前视距离时前视目标点即路径终点，而
+    // 终点是"即将被压线越过"的点，α 指向它会在通过前瞬间饱和（上述 Run
+    // 全程居中 ±0.1 m，舵角仍跳到 -21°，叠加强制动引发侧滑，侧偏角
+    // 1.53 rad 超评分上限 11 倍）。终点区改用航向保持：舵角 = 增益 ×
+    // 终点航向差，居中时 ≈ 0。
+    double terminal_heading_gain = 1.5; // 终点区航向保持的航向差-舵角增益（无量纲）。
 };
 
 // 单帧跟踪输出：前轮角与速度上限为控制量（单位：弧度、米每秒），
@@ -110,9 +146,10 @@ struct TrackingCommand
     double front_wheel_angle_rad = 0.0; // 目标前轮角，单位为弧度。
     double target_speed_mps = 0.0; // LQR 使用的目标速度，其他算法不修改 SDK 速度目标。
     double remaining_path_distance_m = 0.0; // 当前参考点到终点剩余折线距离。
+    double distance_to_goal_m = 0.0; // 车辆到终点的直线距离（米）：越过终点后剩余折线距离归零，此字段仍能反映真实偏差，终点滞留检测用它判定。
     std::size_t nearest_path_index = 0; // 用于计算进度的最近路径点。
     std::size_t target_path_index = 0; // 用于控制的路径目标点。
-    bool reached_goal = false; // 是否满足终点位置和航向角要求。
+    bool reached_goal = false; // 是否满足终点位置要求及可选的航向要求。
 };
 
 class PathTracker

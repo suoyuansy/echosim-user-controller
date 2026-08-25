@@ -207,9 +207,9 @@ void TrajectoryVisualizer::saveFinal()
         frame.state = actual_points.empty()
             ? VehicleState2D{path_[window_anchor_index_].x,
                              path_[window_anchor_index_].y,
-                             path_[window_anchor_index_].yaw, 0.0, 0.0}
+                             0.0, path_[window_anchor_index_].yaw, 0.0, 0.0}
             : VehicleState2D{actual_points.back().x, actual_points.back().y,
-                             actual_points.back().yaw, 0.0, 0.0};
+                             0.0, actual_points.back().yaw, 0.0, 0.0};
         frame.reference_index = window_anchor_index_;
         frame.window_anchor_index = window_anchor_index_;
         frame.actual_points = actual_points;

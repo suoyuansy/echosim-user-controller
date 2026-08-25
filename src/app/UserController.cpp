@@ -3,7 +3,7 @@
 //   1) makeDefaultTaskConfig()  生成任务配置（起终点/地形根/各模块可调参数）；
 //   2) EchoSimRuntime::initialize()  连接 EchoSim 消息总线（订阅 ego 状态 + 准备控制发布）；
 //   3) PlanningPipeline::buildPath()  代价地图加载或构建 -> 全局规划 -> 路径优化；
-//   4) EchoSimRuntime::run()  跟踪控制循环，直到到达终点停车或运行时出错。
+//   4) EchoSimRuntime::run()  跟踪控制循环，到达终点后持续驻车，直到仿真结束。
 // 任何阶段抛出的异常在 main 末尾统一捕获，打印 [error] 后以 -1 退出。
 #include "tracking/EchoSimRuntime.h"
 #include "app/PlanningPipeline.h"
@@ -27,6 +27,7 @@ void printTaskConfiguration(const TaskConfig& config)
               << ",yaw_rad=" << config.start.yaw << ')' << std::endl
               << "[task] goal=(x=" << config.goal.x
               << ",y=" << config.goal.y
+              << ",z=" << config.goal_z
               << ",yaw_rad=" << config.goal.yaw << ')' << std::endl
               << "[task] terrain_root=" << config.terrain_root.string() << std::endl
               << "[task] output_directory=" << config.output_directory.string() << std::endl

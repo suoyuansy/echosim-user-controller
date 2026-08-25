@@ -81,7 +81,7 @@ TrackingCommand PathTracker::calculate(const Path& path,
 
 // 生成所有横向控制器共用的路径状态。
 // 步骤：空路径直接判达 -> 最近点搜索 -> 剩余折线距离 -> 到点判定
-// （位置容差 + 航向容差）-> 距离刹车限速得到基础目标速度。
+// （位置容差 + 可选航向容差）-> 距离刹车限速得到基础目标速度。
 // 输出中的 target_speed_mps 仅含距离刹车与 max_speed 钳位，
 // 各算法的速度门控在后续叠加。
 TrackingCommand PathTracker::make_base_command_(const Path& path,
@@ -101,23 +101,39 @@ TrackingCommand PathTracker::make_base_command_(const Path& path,
     command.nearest_path_index = nearest;
     command.target_path_index = nearest;
     command.remaining_path_distance_m = remaining_distance_(path, nearest);
-    // 到点判定：用终点直线距离（而非折线长度）对照位置容差，
-    // 航向差归一化到 [-pi, pi] 后对照航向容差。
+    // 到点判定：用终点直线距离（而非折线长度）对照位置容差。竞赛任务的
+    // heading_tolerance=0 表示不约束终点航向，不能把 goal.yaw=0 误解为必须
+    // 朝向世界 X 正轴；仅 require_goal_yaw=true 时才追加航向容差。
     const double distance_to_goal = std::hypot(
         path.back().x - state.x, path.back().y - state.y);
     const double yaw_error = normalize_angle_(path.back().yaw - state.yaw);
+    command.distance_to_goal_m = distance_to_goal;
     command.reached_goal = distance_to_goal <= config_.goal_position_tolerance_m
-        && std::abs(yaw_error) <= config_.goal_yaw_tolerance_rad;
+        && (!config_.require_goal_yaw
+            || std::abs(yaw_error) <= config_.goal_yaw_tolerance_rad);
     // 未到点时计算基础目标速度：先按 v = sqrt(2·a·d) 距离刹车限速，
-    // 再与巡航上限取小并钳到 [0, max_speed]。
+    // 再与巡航上限取小并钳到 [0, max_speed]。终点区用有效减速度
+    // （terminal_brake_decel_mps2，含 SDK 制动滞后），见头文件注释。
     if (!command.reached_goal)
     {
         const double speed_limit = LongitudinalController::distanceSpeedLimit(
             command.remaining_path_distance_m, config_.base_speed_mps,
-            config_.max_deceleration_mps2);
+            config_.terminal_brake_decel_mps2);
         command.target_speed_mps = std::clamp(
             std::min(config_.base_speed_mps, speed_limit), 0.0,
             std::max(0.0, config_.max_speed_mps));
+        // 越过终点后的活性保障：车身越过路径末端后最近点即末端、剩余折线
+        // 距离归零，距离刹车会把目标速度压死为 0，SDK 距离刹停后 v=0 不再
+        // 重启，控制器死寂（Run Test6 20260823_213755 t=48-58 停在终点后
+        // 3.3 m 处 10 s 无任何指令响应）。此时维持途中速度地板，让纯跟踪
+        // 对身后终点的饱和转角形成回绕圆弧；回到终点前方后距离刹车自然接管。
+        if (command.remaining_path_distance_m <= 0.0
+            && distance_to_goal > config_.goal_position_tolerance_m)
+        {
+            command.target_speed_mps = std::max(
+                command.target_speed_mps,
+                config_.pure_pursuit_min_moving_speed_mps);
+        }
     }
     return command;
 }
@@ -320,7 +336,14 @@ TrackingCommand PathTracker::calculatePurePursuit(
                                        std::max(forward_speed_(state), 0.8));
     // 侧偏角 = |后轴真实侧向滑动速度| / 前向速度（弧度）；前向速度设 0.8 m/s
     // 下限防止低速/停车时比值发散误报。
-    if (sideslip > config_.pure_pursuit_slide_sideslip_rad)
+    // 低速豁免（2026-08-23 坡道失速修复）：前向速度低于途中速度地板时不压速。
+    // 实测 Run 20260823_194908 t=455-477：车速从 4 m/s 衰减到 2 m/s 时 vy/vx
+    // 越过阈值触发门控，压到地板后 1.5 m/s + 8° 舵角在 2~3.7° 坡道上驱动力
+    // 不足，失速倒溜并锁轮倒滑 100 m。爬行速度下 vy/vx 比值本身失真，此时
+    // 压速只会杀死爬坡动量；侧偏角评分的真正杀手是失速倒滑（倒退时侧偏角
+    // 直接等于 π），保住前进动量才是最优保护。带速（≥ 地板值）侧滑照常压速。
+    if (forward_speed_(state) >= config_.pure_pursuit_min_moving_speed_mps
+        && sideslip > config_.pure_pursuit_slide_sideslip_rad)
     {
         // 超阈值（默认 5°，评分上限 8° 留余量）判定侧滑，压速到 slide_speed，
         // 等残余滑动衰减后再逐步提速。
@@ -328,11 +351,46 @@ TrackingCommand PathTracker::calculatePurePursuit(
     }
     // 四级速度门控逐级取小后，叠加到基座目标速度（距离刹车限速）之上。
     command.target_speed_mps = std::min(command.target_speed_mps, speed_cap);
+    // 途中最低行驶速度地板：远离终点时目标速度不得低于地板值。门控压速是
+    // 保护性的，但低速 + 大舵角会让车辆在坡道上失速倒溜（见头文件注释），
+    // 2.0 m/s 动量可带过坡段；终点逼近阶段（距离刹车限速已低于地板值）豁免，
+    // 保证收尾刹停语义不变。
+    const double distance_brake_limit = LongitudinalController::distanceSpeedLimit(
+        command.remaining_path_distance_m, config_.base_speed_mps,
+        config_.terminal_brake_decel_mps2);
+    if (distance_brake_limit > config_.pure_pursuit_min_moving_speed_mps)
+    {
+        command.target_speed_mps = std::max(
+            command.target_speed_mps, config_.pure_pursuit_min_moving_speed_mps);
+    }
     // 纯跟踪核心公式：δ = atan2(2·L·sin(α), Ld)（弧度）。由圆弧几何推出：
     // 以后轴为原点、转过 α 到达距离 Ld 的目标点所需曲率 κ = 2·sin(α)/Ld，
     // 阿克曼几何 δ = atan(κ·L)。α 为限幅后值，输出再经 ±23° 钳位。
     command.front_wheel_angle_rad = clamp_steer_(std::atan2(
         2.0 * config_.geometry.wheelbase_m * std::sin(alpha), target_distance));
+    // 终点区航向保持（2026-08-23 终点刹车测试修复）：剩余距离小于前视距离
+    // 时前视目标点就是路径终点，而终点是"即将被压线越过"的点，α 指向它
+    // 会在车辆通过前瞬间饱和（Run Test6 20260823_213755 t=46：全程居中
+    // ±0.1 m，舵角仍跳到 -21°，叠加强制动引发侧滑）。终点仍在车辆前方时
+    // 改用航向保持：舵角正比于终点航向差，居中时 ≈ 0，刹车过程车身稳定；
+    // 终点落到车身后方（越过终点后的回绕恢复）不覆盖，保留纯跟踪几何--
+    // 对身后目标的饱和转角自然形成回绕圆弧。
+    const double goal_ahead = (path.back().x - state.x) * std::cos(state.yaw)
+        + (path.back().y - state.y) * std::sin(state.yaw) > 0.0;
+    if (goal_ahead && target_index + 1 >= path.size()
+        && command.remaining_path_distance_m < lookahead)
+    {
+        // 无终点航向约束时沿最后一段路径切线直行，避免把占位的 goal.yaw=0
+        // 当成真实目标航向。Test6 最后一段约 59.4°，旧逻辑在距终点 4 m 内
+        // 强行转向 0°，既破坏刹车直线性，也使位置到达后仍无法判定完成。
+        const double terminal_yaw = config_.require_goal_yaw || path.size() < 2
+            ? path.back().yaw
+            : std::atan2(path.back().y - path[path.size() - 2].y,
+                         path.back().x - path[path.size() - 2].x);
+        command.front_wheel_angle_rad = clamp_steer_(
+            config_.terminal_heading_gain * normalize_angle_(
+                terminal_yaw - state.yaw));
+    }
     return command;
 }
 
@@ -401,7 +459,7 @@ TrackingCommand PathTracker::calculateLqr(
 // 计算带上下限的纵向速度 P 控制加速度。
 // 输入：目标/实际速度（米每秒）、P 增益 kp、加速度上下限（米每二次方秒）。
 // 先归一上下界顺序（允许任意顺序传入），再输出 a = clamp(kp·(v_t - v_a))。
-// 仅在 LQR 模式下由 EchoSimRuntime 主循环调用，经 TARGET_ACC_CONTROL 下发。
+// 由 EchoSimRuntime 的全部跟踪模式调用，经 TARGET_ACC_CONTROL 下发。
 double LongitudinalController::speedP(double target_speed_mps,
                                       double actual_speed_mps,
                                       double kp,

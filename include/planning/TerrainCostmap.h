@@ -27,10 +27,11 @@ struct TerrainCostmapConfig
     // 走廊（app 层 scan_bounds）限定建图范围，避免启动过慢；再粗会放大障碍
     // 膨胀误差、恶化贴障路径的安全性。
     double resolution_m = 1.0; // 地图栅格分辨率，单位为米。
-    // 坡度阈值 20 度：相对测试硬门槛（最大俯仰 50 度/最大侧倾 45 度）留出较大
-    // 安全余量——代价地图只放行明显缓于比赛限值的坡面，把极限坡度留给跟踪
-    // 阶段的动态姿态控制兜底。
-    double slope_limit_deg = 20.0; // 超过该坡度的栅格不可通行，单位为度。
+    // 坡度阈值 18 度：对齐测试地表参数的标称最大坡度（Tests 中 max_slope_deg=18），
+    // 相对测试硬门槛（最大俯仰 50 度/最大侧倾 45 度）仍留出较大安全余量——
+    // 代价地图只放行明显缓于比赛限值的坡面，把极限坡度留给跟踪阶段的
+    // 动态姿态控制兜底。
+    double slope_limit_deg = 18.0; // 超过该坡度的栅格不可通行，单位为度。
     // 粗糙度阈值 0.20：剔除高频起伏过大的区域（换算单位见 build() 内计算）。
     double roughness_limit = 0.20; // 超过该粗糙度的栅格不可通行。
     double slope_weight = 0.5; // 坡度代价融合权重。
@@ -49,7 +50,7 @@ struct TerrainGrid
     double origin_x = 0.0; // 地图原点 X 坐标，单位为米。
     double origin_y = 0.0; // 地图原点 Y 坐标，单位为米。
     double resolution_m = 2.0; // 当前地图分辨率，单位为米。
-    double slope_limit_deg = 20.0; // 当前地图使用的坡度阈值。
+    double slope_limit_deg = 18.0; // 当前地图使用的坡度阈值。
     double roughness_limit = 0.20; // 当前地图使用的粗糙度阈值。
     double requested_width_m = 0.0; // 原始请求区域宽度，单位为米。
     double requested_height_m = 0.0; // 原始请求区域高度，单位为米。

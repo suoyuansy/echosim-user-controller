@@ -111,11 +111,14 @@ TaskConfig makeDefaultTaskConfig()
     const std::filesystem::path project_root = findProjectRoot_();
 
     TaskConfig config;
-    // 任务起终点（世界坐标，米/弧度）：当前对应 Moon2 场景 Test1 的起终点；
-    // yaw 为 0 表示不约束端点航向。切换测试时同步修改这两行
-    // （Test3/Test4 还有必经途经点，见测试定义文件）。
-    config.start = {-901.787, -3016.257, 0.0};
+    // 任务起终点（世界坐标，米/弧度）：当前对应 Moon2 场景 Test6（终点刹车
+    // 机制测试：起点取终点前 ~150 m 末段直线上，验证距离刹车、终点前蠕动
+    // 补进与到点停车）；yaw 为 0 表示不约束端点航向。切换测试时同步修改这
+    // 两行（切回 Test1：start={-901.787, -3016.257}、goal={-465.065,
+    // -1269.836}；Test3/Test4 还有必经途经点，见测试定义文件）。
+    config.start = {-541.40, -1398.90, 0.0};
     config.goal = { -465.065, -1269.836, 0.0};
+    config.goal_z = -73.944; // Test6 active_task.json: route.goal.z。
     // 地形根：环境变量优先，其次候选路径自动发现；输出固定在项目根下 output/。
     config.terrain_root = findTerrainRoot_(project_root);
     config.output_directory = project_root / "output";

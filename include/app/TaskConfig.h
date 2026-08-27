@@ -20,6 +20,7 @@
 // 模块间只通过 common/PathTypes.h 交换数据；本结构只含配置，不包含任何运行期状态。
 struct TaskConfig
 {
+    int test_number = 1; // 启动菜单选择的 Test 编号；用于严格限定测试专用规划策略。
     // 起终点平面位姿为仿真世界坐标：x/y 单位米，yaw 单位弧度；目标 Z
     // 单独保存，用于复现评测器 distance_to_goal 的三维欧氏距离。
     // 默认值对应 Moon2 场景 Test1；切换测试时需同步修改（Test3/Test4 还有必经途经点）。

@@ -6,11 +6,25 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <stdexcept>
 
 namespace
 {
 // 圆周率常量（仅用于最大前轮角 < 90 度的合法性判断等）。
 constexpr double kPi = 3.14159265358979323846;
+// 仅用于轨迹优化的坡度障碍阈值。全局规划仍按 18° 软风险、40° 硬障碍
+// 搜索；优化器禁止捷径、平滑、圆弧和车辆足迹进入坡度大于 20° 的栅格。
+constexpr double kOptimizerSlopeObstacleDeg = 20.0;
+
+bool optimizer_cell_is_traversable_(const TerrainGrid& grid, int row, int col)
+{
+    if (!grid.isTraversable(row, col) || grid.slope_deg.empty())
+        return false;
+    const std::size_t cell_index = grid.index(row, col);
+    return cell_index < grid.slope_deg.size()
+        && std::isfinite(grid.slope_deg[cell_index])
+        && grid.slope_deg[cell_index] <= kOptimizerSlopeObstacleDeg;
+}
 
 // 两点间欧氏距离。
 // 输入：世界坐标下两个路径点（米）；返回：距离（米），非负。
@@ -30,7 +44,7 @@ bool cell_is_clear_(const TerrainGrid& grid, int row, int col, int margin)
         for (int dc = -margin; dc <= margin; ++dc)
         {
             // 任一邻域栅格不可通行（障碍或越出地图范围）即整体判不安全。
-            if (!grid.isTraversable(row + dr, col + dc))
+            if (!optimizer_cell_is_traversable_(grid, row + dr, col + dc))
                 return false;
         }
     }
@@ -63,7 +77,7 @@ bool footprint_is_clear_at_(const TerrainGrid& grid, double x, double y,
             int col = 0;
             int row = 0;
             if (!grid.worldToGrid(sample_x, sample_y, col, row)
-                || !grid.isTraversable(row, col))
+                || !optimizer_cell_is_traversable_(grid, row, col))
                 return false;
         }
     }
@@ -719,7 +733,8 @@ double minimum_clearance_m_(const Path& path, const TerrainGrid& grid)
             for (int candidate_col = first_col;
                  candidate_col <= last_col; ++candidate_col)
             {
-                if (grid.isTraversable(candidate_row, candidate_col))
+                if (optimizer_cell_is_traversable_(grid, candidate_row,
+                                                   candidate_col))
                     continue;
 
                 double obstacle_x = 0.0;
@@ -779,7 +794,7 @@ double footprint_clearance_m_(const Path& path, const TerrainGrid& grid,
                 int row = 0;
                 if (!grid.worldToGrid(sample_x, sample_y, col, row))
                     return 0.0;
-                if (!grid.isTraversable(row, col))
+                if (!optimizer_cell_is_traversable_(grid, row, col))
                     return 0.0;
 
                 const int search_radius_cells = static_cast<int>(std::ceil(
@@ -796,7 +811,8 @@ double footprint_clearance_m_(const Path& path, const TerrainGrid& grid,
                     for (int obstacle_col = first_col;
                          obstacle_col <= last_col; ++obstacle_col)
                     {
-                        if (grid.isTraversable(obstacle_row, obstacle_col))
+                        if (optimizer_cell_is_traversable_(grid, obstacle_row,
+                                                          obstacle_col))
                             continue;
                         double obstacle_x = 0.0;
                         double obstacle_y = 0.0;
@@ -815,6 +831,69 @@ double footprint_clearance_m_(const Path& path, const TerrainGrid& grid,
     }
     return std::isfinite(minimum_clearance) ? minimum_clearance : -1.0;
 }
+
+bool footprint_hits_slope_obstacle_(const Path& path, const TerrainGrid& grid,
+                                    double length_m, double width_m,
+                                    double sample_step_m)
+{
+    if (path.empty() || grid.slope_deg.empty())
+        return true;
+    const double step = std::clamp(sample_step_m, 0.2, grid.resolution_m);
+    const int longitudinal_steps = std::max(1, static_cast<int>(std::ceil(
+        length_m / step)));
+    const int lateral_steps = std::max(1, static_cast<int>(std::ceil(
+        width_m / step)));
+    for (const PathPoint& point : path)
+    {
+        const double cos_yaw = std::cos(point.yaw);
+        const double sin_yaw = std::sin(point.yaw);
+        for (int longitudinal = 0; longitudinal <= longitudinal_steps;
+             ++longitudinal)
+        {
+            const double forward = -0.5 * length_m + length_m
+                * static_cast<double>(longitudinal)
+                / static_cast<double>(longitudinal_steps);
+            for (int lateral = 0; lateral <= lateral_steps; ++lateral)
+            {
+                const double side = -0.5 * width_m + width_m
+                    * static_cast<double>(lateral)
+                    / static_cast<double>(lateral_steps);
+                int col = 0;
+                int row = 0;
+                if (!grid.worldToGrid(
+                        point.x + forward * cos_yaw - side * sin_yaw,
+                        point.y + forward * sin_yaw + side * cos_yaw,
+                        col, row))
+                    return true;
+                const std::size_t cell_index = grid.index(row, col);
+                if (cell_index >= grid.slope_deg.size()
+                    || !std::isfinite(grid.slope_deg[cell_index])
+                    || grid.slope_deg[cell_index]
+                        > kOptimizerSlopeObstacleDeg)
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool path_center_hits_slope_obstacle_(const Path& path,
+                                      const TerrainGrid& grid)
+{
+    for (const PathPoint& point : path)
+    {
+        int col = 0;
+        int row = 0;
+        if (!grid.worldToGrid(point.x, point.y, col, row))
+            return true;
+        const std::size_t cell_index = grid.index(row, col);
+        if (cell_index >= grid.slope_deg.size()
+            || !std::isfinite(grid.slope_deg[cell_index])
+            || grid.slope_deg[cell_index] > kOptimizerSlopeObstacleDeg)
+            return true;
+    }
+    return false;
+}
 } // namespace
 
 Path PathOptimizer::optimize(const Path& raw_path, const TerrainGrid& grid,
@@ -826,6 +905,19 @@ Path PathOptimizer::optimize(const Path& raw_path, const TerrainGrid& grid,
     // 点数过少或地图为空时无法优化，原样返回。
     if (raw_path.size() < 3 || grid.empty())
         return raw_path;
+    if (grid.slope_deg.size() != grid.cost.size())
+        throw std::runtime_error(
+            "path optimizer requires terrain slope data for the 20 deg obstacle rule");
+    // 优化器不是重规划器：若全局原始中心线已经穿过 >20° 区域，局部捷径、
+    // 平滑和倒圆无法保证找到另一条拓扑路线。按任务约定保留全局输出，既不
+    // 拒绝也不做可能把路径推向其他坡度障碍的局部修改。
+    if (path_center_hits_slope_obstacle_(raw_path, grid))
+    {
+        std::cout << "[optimizer] raw global path crosses slope > 20 deg; "
+                     "preserving unoptimized path"
+                  << std::endl;
+        return raw_path;
+    }
 
     // 直线/圆弧校验采样步长（米）：显式配置优先，并夹紧到
     // [0.2 米, 栅格分辨率]（0.2 为最小采样密度下限，防止过密采样拖慢校验；
@@ -978,14 +1070,20 @@ Path PathOptimizer::optimize(const Path& raw_path, const TerrainGrid& grid,
         && max_curvature
             > kappa_plan * std::max(1.0, config.curvature_validation_tolerance);
     const bool footprint_invalid = footprint_clearance == 0.0;
+    const bool slope_obstacle_collision = footprint_hits_slope_obstacle_(
+        optimized, grid, config.vehicle_overall_length_m,
+        config.vehicle_overall_width_m,
+        config.vehicle_footprint_sample_step_m);
     const bool unsafe_output = curvature_invalid || footprint_invalid
-        || unrounded_corners > 0;
+        || slope_obstacle_collision || unrounded_corners > 0;
     if (unsafe_output)
     {
         std::cerr << "[optimizer] unsafe path detected: curvature_invalid="
                   << (curvature_invalid ? "true" : "false")
                   << ", footprint_collision="
                   << (footprint_invalid ? "true" : "false")
+                  << ", slope_over_20_collision="
+                  << (slope_obstacle_collision ? "true" : "false")
                   << ", unrounded_corners=" << unrounded_corners;
         if (config.reject_unsafe_output)
         {

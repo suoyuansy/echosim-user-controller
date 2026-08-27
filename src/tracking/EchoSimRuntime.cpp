@@ -22,6 +22,7 @@ constexpr int kLoopPeriodMs = 100; // 状态订阅超时和循环休眠时间（
 constexpr double kPi = 3.14159265358979323846; // 圆周率常量。
 constexpr double kDegToRad = kPi / 180.0; // 角度转弧度的比例系数。
 constexpr double kRadToDeg = 180.0 / kPi; // 弧度转角度的比例系数。
+constexpr double kMpsToKph = 3.6; // SDK 距离/速度模式的 max_velocity 使用千米每小时。
 constexpr double kKphToMps = 1.0 / 3.6; // EchoSim vx/vy 使用千米每小时（车体系分量：x 前向、y 左正）。
 // 速度指令上升斜率限制，单位米每二次方秒。按真实仿真步长 dt 换算成每帧
 // 允许的上升量：渲染慢于实时时（墙钟 100 ms 仅对应仿真约 14 ms），固定
@@ -34,27 +35,12 @@ constexpr double kSpeedCommandRiseAccelMps2 = 0.5; // 与车辆实际加速能�
 // 不牺牲保护响应。
 constexpr double kSpeedCommandFallAccelMps2 = 2.0; // 指令下降斜率上限。
 constexpr double kFallRateLimitMinActualSpeedMps = 2.0; // 下降斜率限制生效的最低实际车速。
-// 倒溜保护（2026-08-23 转角失速修复）：前进挡下车辆沿坡道后溜（vx < -0.1）
-// 累计超过 0.3 s 仿真时间即进入保持制动，直到 vx 回到 -0.05 以上。实测失速
-// 后纯跟踪 α 变号导致舵角 ±20° 翻转，车辆前进-倒退摇车 135 s 不得脱困
-// （Run 20260823_144546 t=134-269）。保持制动期间前轮回正（倒溜中大舵角
-// 刮擦阻力大且方向反常），退出后由最低行驶速度地板 + 低速舵角上限重新起步。
+// 倒溜保护：前进挡下车辆沿坡道后溜（vx < -0.1）累计超过 0.3 s 后，
+// 非终点捕获状态直接施加正向驱动力，并显式清除制动压力。禁止先锁轮制动，
+// 避免车辆在低附着坡面变成“雪橇”并继续加速后滑；恢复前进后交回跟踪器。
 constexpr double kRollbackSpeedThresholdMps = -0.1; // 判定后溜的前向速度阈值。
-constexpr double kRollbackTriggerDurationSec = 0.3; // 触发保持制动的累计后溜时长（仿真秒）。
-constexpr double kRollbackReleaseSpeedMps = -0.05; // 退出保持制动的前向速度阈值。
-// 保持制动活性保障（Run 20260823_180725 死锁复盘）：坡道上制动与重力平衡时
-// 车辆以 ~-0.21 m/s 持续蠕动，"完全停住"的释放条件永不满足，保持制动卡死
-// 80 s 直到平衡意外打破。保持超过 3 s 且仍在蠕动（|vx| <= 0.3）即强制释放
-// 重试前进（速度地板 + 低速舵角上限接管），形成有界的"制动-重试"循环。
-constexpr double kRollbackHoldMaxSec = 3.0; // 保持制动的最长时长（仿真秒），超时且蠕动即强制释放。
-constexpr double kRollbackCreepSpeedMps = 0.3; // 判定制动-坡道蠕动平衡的速度上限（米/秒）。
-// 倒溜反推恢复（Run 20260823_194908 复盘）：陡坡上保持制动 -3.0 m/s² 锁轮后
-// 轮胎滑动摩擦拉不住重力，车辆抱死向后滑 100 m、倒溜速度冲到 -3.7 m/s，坡度
-// 变缓才停。锁轮的车是"雪橇"，滚动 + 驱动扭矩才能对抗坡道——同一坡段事后
-// 以 2.5 m/s 小舵角通过。保持制动期间若车速仍恶化到进入阈值以下，说明制动
-// 无效，立即切换反推：TARGET_ACC 正加速度 + 前轮回正，恢复前进（vx 达退出
-// 阈值）后回到正常跟踪。
-constexpr double kRollbackThrustEnterSpeedMps = -0.5; // 保持制动无效（仍在加速后滑）时切入反推的车速阈值（米/秒）。
+constexpr double kRollbackTriggerDurationSec = 0.3; // 触发无制动反推的累计后溜时长（仿真秒）。
+constexpr double kRollbackReleaseSpeedMps = -0.05; // 终点捕获滑出后判定仍在后溜的阈值。
 constexpr double kRollbackThrustExitSpeedMps = 0.2; // 反推恢复前进后退出反推的车速阈值（米/秒）。
 constexpr double kRollbackThrustAccelMps2 = 0.8; // 反推目标加速度（米每二次方秒）。
 // 终点滞留蠕动：常规加速度 P 控制若仍在低速坡面克服不了静摩擦，连续滞留
@@ -73,14 +59,6 @@ constexpr double kGoalHoldThrustEnterSpeedMps = -0.05;
 constexpr double kGoalHoldThrustExitSpeedMps = 0.05;
 constexpr double kGoalHoldThrustEnterPositionM = 0.20; // 目标在车前超过此距离才允许反推。
 constexpr double kGoalHoldThrustExitPositionM = 0.05; // 接近目标中心后提前停止反推。
-// 全模式正加速度控制的低速驱动力地板。Run 20260823_230718 在距目标
-// 1.026 m 处速度降到 0.005 m/s 后沿坡面倒退，说明单纯速度/距离模式和很小的
-// P 输出无法克服静摩擦/坡度。当前向速度低于 0.5 m/s、目标速度至少高出
-// 0.05 m/s 时，把正加速度抬到 0.5 m/s²；超过目标速度时仍允许 P 控制输出
-// 负加速度，终点捕获后的制动逻辑不受影响。
-constexpr double kLowSpeedPositiveAccelFloorMps2 = 0.5;
-constexpr double kLowSpeedPositiveAccelMaxSpeedMps = 0.5;
-constexpr double kPositiveAccelFloorSpeedErrorMps = 0.05;
 // 仿真时间源单帧差分的防御性上限（秒）：状态时间戳跳变/重启时钳制单帧 dt，
 // 避免斜率限制被一次性放大。
 constexpr double kMaxSimDtSec = 1.0;
@@ -159,12 +137,60 @@ int gear_modeOrDrive_(int gear_mode)
     return static_cast<int>(sim_msg::Control_GEAR_MODE_DRIVE);
 }
 
-// 构造统一的跟踪加速度控制消息。
-// Pure Pursuit、Stanley 和 LQR 的纵向均使用 TARGET_ACC_CONTROL：直接下发目标加速度
-// （米每二次方秒，由纵向 P 控制算出，负值即减速/制动），横向仍为
-// REQUEST_FRONT_WHEEL_ANGLE。正/零加速度时不得同时设置 BRAKE_TARGET_ACC_CONTROL：
-// Run 20260823_232901 表明 SDK 会优先执行制动，导致 axreq_dm/throttle 均为 0、
-// pbk_con_brk 升到 0.33，正加速度完全无法传递到驱动系统。
+// Pure Pursuit/Stanley 使用 SDK 距离/速度模式：控制器提供剩余停车距离与
+// 速度上限，SDK 自行调节驱动和制动。算法内部速度单位为 m/s，max_velocity
+// 按 SDK 接口要求转换为 km/h；前轮角保持弧度。
+sim_msg::Control buildDistanceVelocity_(const TrackingCommand& command,
+                                        double timestamp_sec,
+                                        int gear_mode)
+{
+    sim_msg::Control control;
+    sim_msg::InitControl(control);
+    control.mutable_header()->set_time_stamp(timestamp_sec);
+    control.mutable_control_type()->set_acc_control_type(
+        sim_msg::Control::CONTROL_TYPE::REQUEST_DISTANCE_AND_VELOCITY);
+    control.mutable_control_type()->set_brake_control_type(
+        sim_msg::Control::CONTROL_TYPE::BRAKE_TARGET_ACC_CONTROL);
+    control.mutable_control_type()->set_steer_control_type(
+        sim_msg::Control::CONTROL_TYPE::REQUEST_FRONT_WHEEL_ANGLE);
+    control.mutable_control_cmd()->set_request_distance_2_stop(
+        std::max(0.0, command.remaining_path_distance_m));
+    control.mutable_control_cmd()->set_max_velocity(
+        std::max(0.0, command.target_speed_mps * kMpsToKph));
+    control.mutable_control_cmd()->set_request_front_wheel_angle(
+        command.front_wheel_angle_rad);
+    control.set_gear_cmd(static_cast<sim_msg::Control_GEAR_MODE>(
+        gear_modeOrDrive_(gear_mode)));
+    return control;
+}
+
+// 构造侧滑滑行控制：显式请求零油门和零制动压力，避免 SDK 距离/速度模式
+// 为追踪侧滑速度上限主动制动。不能使用 ACCEL_NO_CONTROL/BRAKE_NO_CONTROL，
+// 因为 NO_CONTROL 不会清除上一帧可能锁存的油门或制动请求。
+sim_msg::Control buildCoast_(const TrackingCommand& command,
+                             double timestamp_sec,
+                             int gear_mode)
+{
+    sim_msg::Control control;
+    sim_msg::InitControl(control);
+    control.mutable_header()->set_time_stamp(timestamp_sec);
+    control.mutable_control_type()->set_acc_control_type(
+        sim_msg::Control::CONTROL_TYPE::REQUEST_THROTTLE);
+    control.mutable_control_type()->set_brake_control_type(
+        sim_msg::Control::CONTROL_TYPE::REQUEST_BRAKE_PRESSURE_CONTROL);
+    control.mutable_control_type()->set_steer_control_type(
+        sim_msg::Control::CONTROL_TYPE::REQUEST_FRONT_WHEEL_ANGLE);
+    control.mutable_control_cmd()->set_request_throttle(0.0);
+    control.mutable_control_cmd()->set_request_brake_pressure(0.0);
+    control.mutable_control_cmd()->set_request_front_wheel_angle(
+        command.front_wheel_angle_rad);
+    control.set_gear_cmd(static_cast<sim_msg::Control_GEAR_MODE>(
+        gear_modeOrDrive_(gear_mode)));
+    return control;
+}
+
+// LQR、倒溜反推与终点蠕动使用显式加速度控制。正/零加速度时显式清除
+// 制动压力，避免旧制动帧锁存后吞掉驱动力请求。
 sim_msg::Control buildAcceleration_(const TrackingCommand& command,
                                     double acceleration_mps2,
                                     double timestamp_sec,
@@ -326,12 +352,10 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
     bool have_state = false; // 是否至少接收过一帧有效状态。
     std::size_t progress_index = 0; // 当前路径进度，只允许向前搜索。
     double last_target_speed_mps = 0.0; // 上一帧速度指令，用于上升斜率限制。
-    // 倒溜保护状态：rollback_duration_sec 按仿真时间累计后溜时长，
-    // rollback_hold 置位期间每帧下发保持制动帧（前轮回正 + 制动加速度）。
+    // 倒溜保护状态：rollback_duration_sec 按仿真时间累计后溜时长；触发后
+    // 直接进入无制动反推，避免普通路段锁轮后继续侧滑/后滑。
     double rollback_duration_sec = 0.0; // 连续后溜累计时长（仿真秒）。
-    bool rollback_hold = false; // 是否处于倒溜保持制动状态。
-    double rollback_hold_duration_sec = 0.0; // 保持制动已持续时长（仿真秒），用于活性释放。
-    bool rollback_thrust = false; // 是否处于倒溜反推状态（保持制动无效时切入）。
+    bool rollback_thrust = false; // 是否处于无制动倒溜反推状态。
     // 终点滞留蠕动状态：goal_stall_duration_sec 累计低速滞留时长，
     // goal_creep 置位期间改发 TARGET_ACC 小加速度帧推动车辆重新起步。
     double goal_stall_duration_sec = 0.0; // 连续滞留累计时长（仿真秒）。
@@ -473,15 +497,17 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
             distance_to_goal <= config.tracking.goal_position_tolerance_m
             && (!config.tracking.require_goal_yaw
                 || goal_yaw_error <= config.tracking.goal_yaw_tolerance_rad);
-        if (inside_goal && !goal_brake_active
-            && !rollback_hold && !rollback_thrust)
+        // 目标前后位置迟滞仅在终点捕获区内启用。途中（包括接近终点但
+        // 尚未进入容差圈的阶段）只执行常规跟踪/减速，不使用目标前后投影
+        // 约束，避免它干扰正常路径跟踪。
+        const bool goal_position_hysteresis_active = inside_goal;
+        if (inside_goal && !goal_brake_active && !rollback_thrust)
         {
             goal_brake_active = true;
             goal_hold_thrust = false;
             goal_stationary_hold_sec = 0.0;
             goal_creep = false;
             goal_stall_duration_sec = 0.0;
-            rollback_hold = false;
             rollback_thrust = false;
             rollback_duration_sec = 0.0;
             std::cout << std::fixed << std::setprecision(3)
@@ -504,7 +530,6 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
                 goal_hold_complete = false;
                 if (state.vx < kRollbackReleaseSpeedMps)
                 {
-                    rollback_hold = false;
                     rollback_thrust = true;
                     rollback_duration_sec = 0.0;
                     std::cout << "[goal] capture slid outside at distance "
@@ -526,6 +551,7 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
                 // 任务 stopped_speed，辅助期间可连续累计驻留时间。
                 if (!goal_hold_thrust
                     && state.vx <= kGoalHoldThrustEnterSpeedMps
+                    && goal_position_hysteresis_active
                     && goal_longitudinal_error_m
                         >= kGoalHoldThrustEnterPositionM)
                 {
@@ -538,6 +564,7 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
                 }
                 else if (goal_hold_thrust
                          && (state.vx >= kGoalHoldThrustExitSpeedMps
+                             || !goal_position_hysteresis_active
                              || goal_longitudinal_error_m
                                 <= kGoalHoldThrustExitPositionM))
                 {
@@ -602,15 +629,9 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
             }
         }
 
-        // 倒溜保护状态机：前进挡下持续后溜（近零速大舵角失速后坡道溜车）先
-        // 进入保持制动；保持期间直接下发制动帧（前轮回正 + -3.0 m/s²），跳过
-        // 跟踪计算--后溜中纯跟踪 α 变号会让舵角 ±20° 翻转，形成摇车死循环。
-        // 三种退出路径：
-        //   1. 完全停住（vx 回升）：恢复正常跟踪（速度地板 + 低速舵角上限起步）；
-        //   2. 保持超时且仍在蠕动：强制释放重试前进（活性保障）；
-        //   3. 制动无效（车速仍恶化到 -0.5 以下）：锁轮滑动摩擦拉不住坡道，
-        //      切入反推--TARGET_ACC 正加速度 + 前轮回正，用驱动力对抗重力，
-        //      恢复前进后退出（Run 20260823_194908 锁轮倒滑 100 m 的对策）。
+        // 非终点倒溜恢复：持续后溜达到阈值后直接发 TARGET_ACC 正加速度，
+        // 同时显式请求 0 制动压力。整个恢复过程不下发制动，前轮回正以减小
+        // 轮胎刮擦阻力；vx 恢复到 +0.2 m/s 后再交回正常路径跟踪。
         if (rollback_thrust)
         {
             if (state.vx >= kRollbackThrustExitSpeedMps)
@@ -621,7 +642,7 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
                              "resuming tracking" << std::endl;
             }
         }
-        else if (!rollback_hold)
+        else
         {
             if (state.vx < kRollbackSpeedThresholdMps)
                 rollback_duration_sec += dt_sec;
@@ -629,66 +650,15 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
                 rollback_duration_sec = 0.0;
             if (rollback_duration_sec > kRollbackTriggerDurationSec)
             {
-                rollback_hold = true;
-                rollback_hold_duration_sec = 0.0;
-                std::cout << "[recover] rollback detected: holding brake until stopped"
-                          << std::endl;
-            }
-        }
-        else
-        {
-            rollback_hold_duration_sec += dt_sec;
-            // 释放条件（满足其一）：完全停住；或保持超时且仍在蠕动--
-            // 坡道上制动与重力平衡在微小倒溜速度，"完全停住"永不满足，
-            // 强制释放重试前进避免死锁。
-            const bool creep_equilibrium =
-                std::abs(state.vx) <= kRollbackCreepSpeedMps;
-            if (state.vx >= kRollbackReleaseSpeedMps)
-            {
-                rollback_hold = false;
-                rollback_duration_sec = 0.0;
-                std::cout << "[recover] rollback stopped; resuming tracking"
-                          << std::endl;
-            }
-            else if (rollback_hold_duration_sec > kRollbackHoldMaxSec
-                     && creep_equilibrium)
-            {
-                rollback_hold = false;
-                rollback_duration_sec = 0.0;
-                std::cout << "[recover] rollback hold timeout while creeping; "
-                             "retrying forward" << std::endl;
-            }
-            else if (state.vx < kRollbackThrustEnterSpeedMps)
-            {
-                // 保持制动下车速仍在恶化：制动无效（锁轮打滑），切反推。
-                rollback_hold = false;
                 rollback_thrust = true;
-                std::cout << "[recover] brake hold ineffective (sliding at "
-                          << state.vx << " m/s); thrusting forward" << std::endl;
+                std::cout << "[recover] rollback detected: applying brake-free forward thrust"
+                          << std::endl;
             }
-        }
-
-        if (rollback_hold)
-        {
-            // 保持制动帧（-3.0 m/s^2 + 前轮回正），成功则缓存供订阅超时
-            // 重发；期间进度索引不变，视觉窗口与日志照常推进。
-            const sim_msg::Control hold_control = buildBrakeHold_(
-                control_time_sec + last_dt_sec, config.gear_mode, -3.0);
-            if (publish_(control_publisher, hold_control, "rollback hold stop"))
-            {
-                last_control = hold_control;
-                have_last_control = true;
-            }
-            visualizer.update(state, progress_index, control_time_sec);
-            visualizer.pumpWindow();
-            sim_msg::SleepMS(kLoopPeriodMs);
-            continue;
         }
 
         if (rollback_thrust)
         {
-            // 反推帧（TARGET_ACC +0.8 m/s^2 + 前轮回正）：电机扭矩对抗坡道
-            // 重力，恢复前进（vx >= +0.2）后交还正常跟踪；期间进度索引不变。
+            // 无制动反推帧（TARGET_ACC +0.8 m/s^2 + 制动压力 0 + 前轮回正）。
             const sim_msg::Control thrust_control = buildRollbackThrust_(
                 control_time_sec + last_dt_sec, config.gear_mode,
                 kRollbackThrustAccelMps2);
@@ -735,6 +705,15 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
                 command.distance_to_goal_m
                     / config.tracking.goal_approach_time_sec);
         }
+        // 侧滑速度硬约束：放在全部路径/终点速度修正之后，保证侧滑状态下
+        // 任何速度地板或后续目标速度修正都不能把指令重新抬到 1 m/s 以上。
+        // 仅当侧滑判定解除后，才由下方上升斜率限制逐步恢复速度。
+        if (command.sliding)
+        {
+            command.target_speed_mps = std::min(
+                command.target_speed_mps,
+                config.tracking.pure_pursuit_slide_speed_mps);
+        }
         // 速度指令上升斜率限制：阶梯弯内路径短暂摆直时各速度门控会瞬时
         // 全开，指令从 1.0 一帧跳到 4.0 重新激励侧滑（实测弯中二次滑移
         // 侧偏角 18°）。斜率以加速度计，按本帧真实仿真步长 dt 换算；
@@ -745,17 +724,17 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
         // 下降斜率限制（仅实际车速高于 2.0 m/s 时生效）：弯道入口指令
         // 一帧跳降会触发 SDK 急刹，产生超评分红线的加速度尖峰；低速段
         // 保护性压速仍瞬时下降，不牺牲侧滑/弯道保护响应。
-        if (actual_speed > kFallRateLimitMinActualSpeedMps)
+        if (!command.sliding
+            && actual_speed > kFallRateLimitMinActualSpeedMps)
         {
             command.target_speed_mps = std::max(
                 command.target_speed_mps,
                 last_target_speed_mps - kSpeedCommandFallAccelMps2 * dt_sec);
         }
         last_target_speed_mps = command.target_speed_mps;
-        // 低速舵角上限：近零速大舵角起步时轮胎刮擦阻力会吃掉全部驱动力矩
-        // （实测失速根因），|vx| 低于 cap_speed 钳到 cap，到 full_speed 线性
-        // 放开到全舵；带速（> full_speed）完全不干预。用 |vx| 而非模长，
-        // 倒溜时同样限制避免保持制动退出后立即打大舵角再次失速。
+        // 可选低速舵角上限；当前默认关闭。启用时，|vx| 低于 cap_speed
+        // 钳到 cap，到 full_speed 线性放开到全舵；使用 |vx| 使倒溜时也生效。
+        if (config.tracking.enable_low_speed_steer_limit)
         {
             const double forward_abs = std::abs(state.vx);
             const double& cap_speed =
@@ -819,37 +798,44 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
                       << std::endl;
         }
 
-        // 阶段 5：构造控制消息。全部跟踪算法统一使用 TARGET_ACC_CONTROL，
-        // 由目标速度与带符号前向速度 state.vx 的误差计算纵向加速度；使用
-        // 带符号速度可在车辆后溜时自然增大正向驱动力。低速正向误差明显时
-        // 施加 +0.5 m/s² 地板，克服坡面静摩擦；超速时保留负加速度减速。
+        // 阶段 5：Pure Pursuit/Stanley 通常使用 SDK 距离/速度模式；侧滑且
+        // 实际平面速度仍高于侧滑上限时，改发零油门、零制动滑行帧，避免
+        // SDK 为快速追踪限速而制动并在坡面穿过零速。LQR保留显式加速度。
         double requested_acceleration_mps2 = 0.0;
+        bool sdk_speed_mode = false;
+        bool coast_mode = false;
+        sim_msg::Control control;
         if (goal_creep)
         {
-            // 蠕动帧：TARGET_ACC 固定正加速度推动车辆重新起步，横向仍用跟踪
-            // 转角（已受低速舵角上限约束），克服坡面静摩擦与低速后溜。
+            // 蠕动帧：临时切换 TARGET_ACC 固定正加速度推动车辆重新起步。
             requested_acceleration_mps2 = kGoalCreepAccelMps2;
+            control = buildAcceleration_(command, requested_acceleration_mps2,
+                                         control_time_sec, config.gear_mode);
         }
-        else
+        else if (command.sliding
+                 && actual_speed
+                    > config.tracking.pure_pursuit_slide_speed_mps)
+        {
+            coast_mode = true;
+            control = buildCoast_(command, control_time_sec,
+                                  config.gear_mode);
+        }
+        else if (config.tracking.method == TrackerMethod::Lqr)
         {
             requested_acceleration_mps2 = LongitudinalController::speedP(
                 command.target_speed_mps, state.vx,
                 config.tracking.longitudinal_accel_kp,
                 -config.tracking.max_deceleration_mps2,
                 config.tracking.max_acceleration_mps2);
-            const double forward_speed_error =
-                command.target_speed_mps - state.vx;
-            if (state.vx < kLowSpeedPositiveAccelMaxSpeedMps
-                && forward_speed_error > kPositiveAccelFloorSpeedErrorMps)
-            {
-                requested_acceleration_mps2 = std::max(
-                    requested_acceleration_mps2,
-                    kLowSpeedPositiveAccelFloorMps2);
-            }
+            control = buildAcceleration_(command, requested_acceleration_mps2,
+                                         control_time_sec, config.gear_mode);
         }
-        const sim_msg::Control control = buildAcceleration_(
-            command, requested_acceleration_mps2,
-            control_time_sec, config.gear_mode);
+        else
+        {
+            sdk_speed_mode = true;
+            control = buildDistanceVelocity_(command, control_time_sec,
+                                             config.gear_mode);
+        }
         // 阶段 6：发布控制帧。成功则缓存为 last_control 供超时重发，
         // 失败仅记日志不终止（等待下一帧通信恢复）。
         const bool control_published = publish_(control_publisher, control,
@@ -883,6 +869,12 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
                       << ",y=" << state.y
                       << ",yaw_rad=" << state.yaw << ')'
                       << " reference_control=(speed_mps=" << command.target_speed_mps
+                      << ",mode=" << (coast_mode
+                                           ? "coast"
+                                           : (sdk_speed_mode
+                                                  ? "sdk_speed"
+                                                  : "target_acc"))
+                      << ",sliding=" << (command.sliding ? "yes" : "no")
                       << ",accel_mps2=" << requested_acceleration_mps2
                       << ",front_wheel_deg="
                       << command.front_wheel_angle_rad * kRadToDeg << ')'

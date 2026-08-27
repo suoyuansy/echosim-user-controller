@@ -19,9 +19,9 @@ struct PathOptimizerConfig
 {
     double shortcut_max_distance_m = 200.0; // 视线捷径单段最大跨度（米），限制最坏搜索量；跨度再大也不合并，防止一次直线校验覆盖过长线段。
     double clearance_sample_step_m = 1.0;   // 直线可行性检查的采样步长（米）；0 表示取栅格分辨率的一半。实际值会被夹紧到 [0.2, 栅格分辨率] 区间。
-    int clearance_margin_cells = 2;         // 直线与障碍保持的栅格余量圈数（1 = 八邻域空旷，与规划器一致）；等价于把障碍层膨胀 margin 圈后再查询单点。0 表示只查采样点所在栅格。
-    int smoothing_iterations = 7;           // 平滑迭代次数；0 表示只做捷径不平滑。每轮迭代对全部内部点各生成一次候选移动，收敛速度与轮数成正比。
-    double smoothing_weight = 0.30;         // 平滑位移权重，取值 (0, 0.5]，越大转角越圆；候选点 = w*prev + (1-2w)*current + w*next 的加权平均，w=0.5 时退化为两邻点中点。
+    int clearance_margin_cells = 2;         // 优化路径与硬障碍保持两格额外安全余量。
+    int smoothing_iterations = 3;           // 恢复 cc 配置：平滑迭代三轮，减少过度平滑和长距离捷径化。
+    double smoothing_weight = 0.25;         // 恢复 cc 配置：使用较温和的平滑位移权重。
     double resample_step_m = 2.0;           // 平滑后重采样步长（米），恢复稠密参考点供跟踪；0 表示取栅格分辨率。跟踪的最近点搜索依赖稠密点随车推进。
     // ===== 运动学参数（与跟踪模块 TrackingConfig::geometry 同源）=====
     // 设计文档要求规划与控制共用同一套车辆参数；两处独立维护，修改任一处

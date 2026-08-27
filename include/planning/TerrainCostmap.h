@@ -27,15 +27,13 @@ struct TerrainCostmapConfig
     // 走廊（app 层 scan_bounds）限定建图范围，避免启动过慢；再粗会放大障碍
     // 膨胀误差、恶化贴障路径的安全性。
     double resolution_m = 1.0; // 地图栅格分辨率，单位为米。
-    // 坡度阈值 18 度：对齐测试地表参数的标称最大坡度（Tests 中 max_slope_deg=18），
-    // 相对测试硬门槛（最大俯仰 50 度/最大侧倾 45 度）仍留出较大安全余量——
-    // 代价地图只放行明显缓于比赛限值的坡面，把极限坡度留给跟踪阶段的
-    // 动态姿态控制兜底。
-    double slope_limit_deg = 18.0; // 超过该坡度的栅格不可通行，单位为度。
-    // 粗糙度阈值 0.20：剔除高频起伏过大的区域（换算单位见 build() 内计算）。
-    double roughness_limit = 0.20; // 超过该粗糙度的栅格不可通行。
-    double hard_slope_limit_deg = 40.0; // 超过该合成坡度才作为物理硬障碍。
-    double hard_roughness_limit = 0.50; // 超过该粗糙度才作为物理硬障碍。
+    // 18°/0.20 是软风险归一化基准：达到基准后对应风险分量饱和，但栅格仍
+    // 可通行；是否绕行由全局规划的极大软代价权重决定。只有下面的物理硬
+    // 阈值才会把栅格写入 hard_obstacle。
+    double slope_limit_deg = 18.0; // 坡度软风险饱和基准，单位为度。
+    double roughness_limit = 0.20; // 粗糙度软风险饱和基准。
+    double hard_slope_limit_deg = 40.0; // 合成坡度达到 40° 才直接作为物理硬障碍。
+    double hard_roughness_limit = 0.75; // 超过该粗糙度才作为物理硬障碍；覆盖 Test2 终点约 0.681 的粗糙度。
     double slope_weight = 0.5; // 坡度代价融合权重。
     double roughness_weight = 0.5; // 粗糙度代价融合权重。
     // 每次批量查询 64x64=4096 个采样点（模块 1 约定：建图用批量查询，禁逐点
@@ -55,7 +53,7 @@ struct TerrainGrid
     double slope_limit_deg = 18.0; // 当前地图使用的坡度阈值。
     double roughness_limit = 0.20; // 当前地图使用的粗糙度阈值。
     double hard_slope_limit_deg = 40.0; // 当前地图的坡度硬障碍阈值。
-    double hard_roughness_limit = 0.50; // 当前地图的粗糙度硬障碍阈值。
+    double hard_roughness_limit = 0.75; // 当前地图的粗糙度硬障碍阈值。
     double requested_width_m = 0.0; // 原始请求区域宽度，单位为米。
     double requested_height_m = 0.0; // 原始请求区域高度，单位为米。
     int rows = 0; // 栅格行数。
@@ -84,9 +82,9 @@ struct TerrainGrid
         return row >= 0 && col >= 0 && row < rows && col < cols;
     }
 
-    // 判断栅格有效且没有被地形阈值标记为障碍。
+    // 判断栅格有效且没有被物理硬阈值标记为障碍。
     // 两个否决条件：valid==0 表示该栅格没有有效地形查询结果（数据空洞）；
-    // cost>=1 表示坡度或粗糙度超过阈值（融合代价被固定为障碍值 1）。
+    // hard_obstacle!=0 表示坡度或粗糙度达到物理硬阈值。
     // 越界栅格一律视为不可通行，保证规划器不会越出地图边界。
     bool isTraversable(int row, int col) const
     {
@@ -120,7 +118,7 @@ struct TerrainGrid
 class TerrainCostmap
 {
 public:
-    // 融合坡度和粗糙度代价，超过阈值的栅格固定为障碍代价 1。
+    // 融合坡度和粗糙度软代价；只有超过物理硬阈值才返回障碍代价 1。
     // 输入：坡度单位为度、粗糙度无量纲；输出为归一化融合代价，范围 0 到 1。
     static float fuseCost(double slope_deg,
                           double roughness,

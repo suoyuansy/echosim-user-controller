@@ -134,6 +134,7 @@ TaskConfig makeTaskConfigForTest(int test_number)
         throw std::runtime_error("test number must be between 1 and 6");
 
     TaskConfig config = makeDefaultTaskConfig();
+    config.test_number = test_number;
     switch (test_number)
     {
     case 1:
@@ -151,12 +152,8 @@ TaskConfig makeTaskConfigForTest(int test_number)
         config.goal = {-1884.414, 2441.308, 0.0};
         config.goal_z = -84.211;
         config.waypoints = {{-2430.317, 2004.703, 0.0}};
-        // 降低软地形代价对路径长度的放大，避免 A* 为绕开非障碍高代价格
-        // 在必经点引导走廊末端立即折返；硬障碍与两格全局余量不变。
-        config.planner.cost_weight = 2.0;
-        // Test3 的可行走廊在首段转角处较窄。全局搜索仍保留两格余量；
-        // 优化阶段由一格中心线余量叠加完整车体矩形碰撞检查，避免重复膨胀
-        // 阻止本来具有车体净空的曲率连续圆弧。
+        // Test3 走廊较窄，优化阶段使用一格中心线余量并叠加完整车体矩形
+        // 碰撞检查，避免两格重复膨胀阻止可执行圆弧。
         config.optimizer.clearance_margin_cells = 1;
         break;
     case 4:

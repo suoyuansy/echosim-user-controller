@@ -81,19 +81,20 @@ struct TrackingConfig
     double curve_lookahead_m = 40.0; // 曲率预判减速的前瞻距离（米）：高速下前方出现显著转向时提前按最大减速度限速。
     double curve_heading_threshold_rad = 20.0 * 3.14159265358979323846 / 180.0; // 判定为弯的累计航向变化阈值。
     double pure_pursuit_slide_sideslip_rad = 5.0 * 3.14159265358979323846 / 180.0; // 侧滑检测阈值：车体系侧偏角超过该值说明后轴开始滑动（评分上限 8°，留余量）。
-    double pure_pursuit_slide_speed_mps = 1.0; // 检测到侧滑时的限速值，等残余滑动衰减后再提速。
+    double pure_pursuit_slide_speed_mps = 2.0; // 侧滑限速；超速时运行时以零油门、零制动滑行降速。
     // 途中最低行驶速度 2.0 m/s（2026-08-23 坡道失速修复，由 1.5 上调）：各速度
     // 门控取小后，若仍远离终点（距离刹车限速高于该值），把目标速度抬回该地板
     // 值。实测 1.5 m/s 地板不够：Run 20260823_194908 t=455-477 坡道（pitch
     // 2~3.7°）上侧滑门控把目标压到 1.5 m/s 后，1.5 m/s + 8° 舵角的驱动力不足
     // 失速倒溜；而事后以 2.5 m/s 小舵角通过同一坡段。2.0 m/s 过 R=8.1 m 弧的
     // 横向加速度仅 0.49 m/s²，评分安全。终点收尾刹车不受影响。
-    double pure_pursuit_min_moving_speed_mps = 2.0; // 途中目标速度地板值（米/秒），仅终点逼近阶段豁免。
+    double pure_pursuit_min_moving_speed_mps = 2.0; // 正常途中目标速度地板；侧滑和终点逼近阶段豁免。
     // 低速舵角上限（2026-08-23 转角失速修复，由运行时层执行）：|vx| 低于
     // cap_speed 时前轮角钳到 cap（默认 8°），到 full_speed 线性放开到全舵。
     // 实测近零速带 14° 舵角起步时刮擦阻力吃掉全部驱动力矩（同上 Run），而直轮
     // + 0.3 油门即可起步；速度起来后再给足转向不影响过弯（1.5 m/s 以上全舵）。
-    double low_speed_steer_cap_rad = 8.0 * 3.14159265358979323846 / 180.0; // 低速起步阶段的前轮角上限（弧度）。
+    bool enable_low_speed_steer_limit = false; // 是否启用低速舵角限制；当前关闭，低速时允许使用完整前轮转角。
+    double low_speed_steer_cap_rad = 8.0 * 3.14159265358979323846 / 180.0; // 启用低速限制时的前轮角上限（弧度）。
     double low_speed_steer_cap_speed_mps = 0.8; // 舵角钳位生效的前向速度上限（米/秒）。
     double low_speed_steer_full_speed_mps = 1.5; // 舵角完全放开的前向速度（米/秒），与 cap_speed 之间线性过渡。
     double stanley_gain = 1.0; // Stanley 横向误差增益。
@@ -144,11 +145,12 @@ struct TrackingConfig
 struct TrackingCommand
 {
     double front_wheel_angle_rad = 0.0; // 目标前轮角，单位为弧度。
-    double target_speed_mps = 0.0; // LQR 使用的目标速度，其他算法不修改 SDK 速度目标。
+    double target_speed_mps = 0.0; // 目标速度上限；PP/Stanley交给SDK速度模式，LQR用于加速度闭环。
     double remaining_path_distance_m = 0.0; // 当前参考点到终点剩余折线距离。
     double distance_to_goal_m = 0.0; // 车辆到终点的直线距离（米）：越过终点后剩余折线距离归零，此字段仍能反映真实偏差，终点滞留检测用它判定。
     std::size_t nearest_path_index = 0; // 用于计算进度的最近路径点。
     std::size_t target_path_index = 0; // 用于控制的路径目标点。
+    bool sliding = false; // 后轴侧偏角超过阈值；纵向控制必须保留侧滑限速且禁止加速度地板。
     bool reached_goal = false; // 是否满足终点位置要求及可选的航向要求。
 };
 

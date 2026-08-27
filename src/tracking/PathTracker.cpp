@@ -335,15 +335,10 @@ TrackingCommand PathTracker::calculatePurePursuit(
     const double sideslip = std::atan2(std::abs(lateral_slip),
                                        std::max(forward_speed_(state), 0.8));
     // 侧偏角 = |后轴真实侧向滑动速度| / 前向速度（弧度）；前向速度设 0.8 m/s
-    // 下限防止低速/停车时比值发散误报。
-    // 低速豁免（2026-08-23 坡道失速修复）：前向速度低于途中速度地板时不压速。
-    // 实测 Run 20260823_194908 t=455-477：车速从 4 m/s 衰减到 2 m/s 时 vy/vx
-    // 越过阈值触发门控，压到地板后 1.5 m/s + 8° 舵角在 2~3.7° 坡道上驱动力
-    // 不足，失速倒溜并锁轮倒滑 100 m。爬行速度下 vy/vx 比值本身失真，此时
-    // 压速只会杀死爬坡动量；侧偏角评分的真正杀手是失速倒滑（倒退时侧偏角
-    // 直接等于 π），保住前进动量才是最优保护。带速（≥ 地板值）侧滑照常压速。
-    if (forward_speed_(state) >= config_.pure_pursuit_min_moving_speed_mps
-        && sideslip > config_.pure_pursuit_slide_sideslip_rad)
+    // 下限防止停车噪声发散。侧滑状态不再做低速豁免，确保限速可真正降到
+    // slide_speed，而不会在低速时重新进入 2 m/s 速度地板。
+    command.sliding = sideslip > config_.pure_pursuit_slide_sideslip_rad;
+    if (command.sliding)
     {
         // 超阈值（默认 5°，评分上限 8° 留余量）判定侧滑，压速到 slide_speed，
         // 等残余滑动衰减后再逐步提速。
@@ -358,7 +353,8 @@ TrackingCommand PathTracker::calculatePurePursuit(
     const double distance_brake_limit = LongitudinalController::distanceSpeedLimit(
         command.remaining_path_distance_m, config_.base_speed_mps,
         config_.terminal_brake_decel_mps2);
-    if (distance_brake_limit > config_.pure_pursuit_min_moving_speed_mps)
+    if (!command.sliding
+        && distance_brake_limit > config_.pure_pursuit_min_moving_speed_mps)
     {
         command.target_speed_mps = std::max(
             command.target_speed_mps, config_.pure_pursuit_min_moving_speed_mps);

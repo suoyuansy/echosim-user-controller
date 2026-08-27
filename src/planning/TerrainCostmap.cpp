@@ -115,7 +115,7 @@ bool parse_text_values_(const std::string& text, std::vector<ValueType>& values)
 }
 } // namespace
 
-// 功能：融合坡度和粗糙度代价，并将超阈值栅格标记为障碍。
+// 功能：融合坡度和粗糙度软代价，并将达到物理硬阈值的栅格标记为障碍。
 // 输入：slope_deg 坡度（度）、roughness 粗糙度（无量纲）；输出归一化代价 0~1。
 float TerrainCostmap::fuseCost(double slope_deg,
                                double roughness,
@@ -126,7 +126,7 @@ float TerrainCostmap::fuseCost(double slope_deg,
         return kObstacleCost;
 
     // 只有超过车辆物理硬阈值才不可通行；18 度/0.20 仅作为软风险归一化基准。
-    if (slope_deg > config.hard_slope_limit_deg
+    if (slope_deg >= config.hard_slope_limit_deg
         || roughness > config.hard_roughness_limit)
         return kObstacleCost;
 
@@ -633,7 +633,7 @@ bool TerrainCostmap::load(const std::string& directory,
     double slope_limit_deg = 18.0;
     double roughness_limit = 0.20;
     double hard_slope_limit_deg = 40.0;
-    double hard_roughness_limit = 0.50;
+    double hard_roughness_limit = 0.75;
     double requested_width_m = 0.0;
     double requested_height_m = 0.0;
     int version = 0;

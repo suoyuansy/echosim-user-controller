@@ -22,9 +22,10 @@ struct GlobalPlannerConfig
     // 地形代价对搜索边代价的权重：边代价 = 段长 * (1 + cost_weight * 两端
     // 平均代价)。默认 10 表示满代价栅格的等效边长放大到 11 倍，使 A* 明显
     // 绕开高代价（陡峭/崎岖）区域而不是走捷径穿越陡坡；设 0 则退化为纯
-    // 最短路径搜索。
-    double cost_weight = 10.0; // 地形代价对搜索边代价的权重。
-    int clearance_margin_cells = 2; // 为约 1 m 半车宽和转弯圆弧预留两格硬障碍余量。
+    // 最短路径搜索。当前使用 10000，使达到软风险基准的地形代价远大于
+    // 普通绕行距离，仅在没有低风险连通路线时才穿过软风险区。
+    double cost_weight = 10000.0; // 超大软代价权重：近似优先最小化地形风险，再考虑路径长度。
+    int clearance_margin_cells = 1; // 全局路径与硬障碍保持一格安全余量。
     bool allow_zero_margin_fallback = false; // 禁止产生车体包络可能覆盖硬障碍的路径。
 };
 

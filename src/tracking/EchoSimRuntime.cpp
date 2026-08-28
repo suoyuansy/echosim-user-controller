@@ -674,7 +674,7 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
         }
 
         // 阶段 3+4：跟踪计算与限速门控。calculate 内部完成横向转角求解，
-        // 并按 turn/bend/curve/slide 与距离刹车逐级取小得到目标速度上限。
+        // 并按 turn/bend/curve/可选 slide 与距离刹车逐级取小得到目标速度上限。
         // progress_index 用上一帧最近点做锚点，保证进度单调推进。
         TrackingCommand command = tracker.calculate(
             path, state, progress_index);
@@ -705,10 +705,9 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
                 command.distance_to_goal_m
                     / config.tracking.goal_approach_time_sec);
         }
-        // 侧滑速度硬约束：放在全部路径/终点速度修正之后，保证侧滑状态下
-        // 任何速度地板或后续目标速度修正都不能把指令重新抬到 1 m/s 以上。
-        // 仅当侧滑判定解除后，才由下方上升斜率限制逐步恢复速度。
-        if (command.sliding)
+        // 侧滑速度约束：只有显式启用时才在全部路径/终点速度修正之后执行。
+        // 关闭时仍保留 command.sliding 诊断状态，但不改变目标速度。
+        if (config.tracking.enable_sideslip_speed_limit && command.sliding)
         {
             command.target_speed_mps = std::min(
                 command.target_speed_mps,
@@ -724,7 +723,7 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
         // 下降斜率限制（仅实际车速高于 2.0 m/s 时生效）：弯道入口指令
         // 一帧跳降会触发 SDK 急刹，产生超评分红线的加速度尖峰；低速段
         // 保护性压速仍瞬时下降，不牺牲侧滑/弯道保护响应。
-        if (!command.sliding
+        if (!(config.tracking.enable_sideslip_speed_limit && command.sliding)
             && actual_speed > kFallRateLimitMinActualSpeedMps)
         {
             command.target_speed_mps = std::max(
@@ -798,9 +797,9 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
                       << std::endl;
         }
 
-        // 阶段 5：Pure Pursuit/Stanley 通常使用 SDK 距离/速度模式；侧滑且
-        // 实际平面速度仍高于侧滑上限时，改发零油门、零制动滑行帧，避免
-        // SDK 为快速追踪限速而制动并在坡面穿过零速。LQR保留显式加速度。
+        // 阶段 5：Pure Pursuit/Stanley 通常使用 SDK 距离/速度模式；启用侧滑
+        // 限速且实际平面速度仍高于侧滑上限时，改发零油门、零制动滑行帧，
+        // 避免 SDK 为快速追踪限速而制动并在坡面穿过零速。LQR保留显式加速度。
         double requested_acceleration_mps2 = 0.0;
         bool sdk_speed_mode = false;
         bool coast_mode = false;
@@ -812,7 +811,8 @@ int EchoSimRuntime::run(const TaskConfig& config, const Path& path) const
             control = buildAcceleration_(command, requested_acceleration_mps2,
                                          control_time_sec, config.gear_mode);
         }
-        else if (command.sliding
+        else if (config.tracking.enable_sideslip_speed_limit
+                 && command.sliding
                  && actual_speed
                     > config.tracking.pure_pursuit_slide_speed_mps)
         {

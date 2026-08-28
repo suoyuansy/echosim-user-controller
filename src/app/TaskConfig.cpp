@@ -172,9 +172,9 @@ TaskConfig makeTaskConfigForTest(int test_number)
         config.goal_z = -83.539;
         break;
     case 6:
-        config.start = {-541.400, -1398.900, 0.0};
-        config.goal = {-465.065, -1269.836, 0.0};
-        config.goal_z = -73.944;
+        config.start = {-617.820,-1541.780, 0.0};
+        config.goal = {-560.570, -1443.590, 0.0};
+        config.goal_z = -74.979;
         break;
     default:
         break;

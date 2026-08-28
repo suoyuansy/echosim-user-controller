@@ -29,6 +29,7 @@ struct VehicleState2D
 struct VehicleGeometry
 {
     double wheelbase_m = 2.76; // 车辆轴距，单位为米。
+    double wheel_track_m = 1.635; // 左右轮接地点间距，单位为米。
     double front_axle_offset_m = 1.41; // 质心到前轴距离，当前版本保留未参与计算。
     double rear_axle_offset_m = 1.35; // 质心到后轴距离，作为纯跟踪基准点。
     double max_front_wheel_angle_rad = 23.0 * (3.14159265358979323846 / 180.0); // 最大前轮角。
@@ -81,7 +82,8 @@ struct TrackingConfig
     double curve_lookahead_m = 40.0; // 曲率预判减速的前瞻距离（米）：高速下前方出现显著转向时提前按最大减速度限速。
     double curve_heading_threshold_rad = 20.0 * 3.14159265358979323846 / 180.0; // 判定为弯的累计航向变化阈值。
     double pure_pursuit_slide_sideslip_rad = 5.0 * 3.14159265358979323846 / 180.0; // 侧滑检测阈值：车体系侧偏角超过该值说明后轴开始滑动（评分上限 8°，留余量）。
-    double pure_pursuit_slide_speed_mps = 2.0; // 侧滑限速；超速时运行时以零油门、零制动滑行降速。
+    bool enable_sideslip_speed_limit = true; // 是否启用侧滑限速；关闭时仍检测并记录侧滑状态，但不压低目标速度或切换滑行控制。
+    double pure_pursuit_slide_speed_mps = 2.0; // 侧滑限速目标值；仅在 enable_sideslip_speed_limit=true 时生效。
     // 途中最低行驶速度 2.0 m/s（2026-08-23 坡道失速修复，由 1.5 上调）：各速度
     // 门控取小后，若仍远离终点（距离刹车限速高于该值），把目标速度抬回该地板
     // 值。实测 1.5 m/s 地板不够：Run 20260823_194908 t=455-477 坡道（pitch
@@ -150,7 +152,7 @@ struct TrackingCommand
     double distance_to_goal_m = 0.0; // 车辆到终点的直线距离（米）：越过终点后剩余折线距离归零，此字段仍能反映真实偏差，终点滞留检测用它判定。
     std::size_t nearest_path_index = 0; // 用于计算进度的最近路径点。
     std::size_t target_path_index = 0; // 用于控制的路径目标点。
-    bool sliding = false; // 后轴侧偏角超过阈值；纵向控制必须保留侧滑限速且禁止加速度地板。
+    bool sliding = false; // 后轴侧偏角超过检测阈值；是否执行侧滑限速由 TrackingConfig 控制。
     bool reached_goal = false; // 是否满足终点位置要求及可选的航向要求。
 };
 

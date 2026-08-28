@@ -19,6 +19,7 @@
 #include <functional>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <iostream>
 #include <limits>
 #include <queue>
@@ -36,6 +37,278 @@
 namespace
 {
 constexpr double kOptimizationSlopeObstacleDeg = 20.0;
+
+struct LateralSlopeStats
+{
+    std::size_t valid_samples = 0;
+    std::size_t invalid_samples = 0;
+    double max_abs_deg = 0.0;
+    double max_signed_deg = 0.0;
+    double max_x = 0.0;
+    double max_y = 0.0;
+};
+
+// Test6 多次运行中，车辆先后在原路线的两个走廊内出现四轮失载；
+// 这些区域作为全局已知危险区，供 Test1-Test6 的规划共同避让：
+//   1) (-589.2, -1492.6) 以及绕行后的 (-585.1, -1514.8)；
+//   2) 再次绕行后在 (-605.6, -1535.5) 附近失载。
+// 每个区域均留约 2 m 余量；仅对当前测试的内存代价地图施加硬障碍，
+// 避免把实验性规避区写入共享缓存。
+constexpr TerrainBounds kAirborneZones[] = {
+    {-601.5, -1520.0, -583.0, -1490.0},
+    {-610.0, -1539.0, -603.0, -1530.0},
+};
+
+// 局部高程扫描显示，四轮失载区位于一条横截面呈 V 形的连续谷地内。
+// 谷底中心线先从左下方进入顶点，再向左上方回折；用折线走廊覆盖整个
+// 谷底，避免只封闭单个矩形后规划器从同一条谷的相邻入口重新进入。
+struct AirborneValleyPoint
+{
+    double x;
+    double y;
+};
+
+constexpr AirborneValleyPoint kAirborneValleyCenterline[] = {
+    {-613.0, -1542.0},
+    {-604.0, -1538.0},
+    {-595.0, -1531.0},
+    {-586.0, -1524.0},
+    {-580.0, -1518.0},
+    {-584.0, -1505.0},
+    {-589.0, -1490.0},
+};
+constexpr double kAirborneValleyHalfWidthM = 4.0;
+
+// 按车辆轮距在路径法线两侧采样地形高程，计算左右轮接地点的横向坡度。
+// 返回 false 表示采样点越界、地形无效或高度数据不可用。
+bool sample_lateral_slope_(const TerrainGrid& grid, const PathPoint& point,
+                           double wheel_track_m, double& left_height_m,
+                           double& right_height_m, double& slope_deg)
+{
+    if (wheel_track_m <= 0.0 || !std::isfinite(point.yaw))
+        return false;
+
+    const double half_track = 0.5 * wheel_track_m;
+    const double sin_yaw = std::sin(point.yaw);
+    const double cos_yaw = std::cos(point.yaw);
+    const double left_x = point.x - half_track * sin_yaw;
+    const double left_y = point.y + half_track * cos_yaw;
+    const double right_x = point.x + half_track * sin_yaw;
+    const double right_y = point.y - half_track * cos_yaw;
+    int left_col = 0;
+    int left_row = 0;
+    int right_col = 0;
+    int right_row = 0;
+    if (!grid.worldToGrid(left_x, left_y, left_col, left_row)
+        || !grid.worldToGrid(right_x, right_y, right_col, right_row))
+        return false;
+
+    const std::size_t left_index = grid.index(left_row, left_col);
+    const std::size_t right_index = grid.index(right_row, right_col);
+    if (left_index >= grid.height.size() || right_index >= grid.height.size()
+        || left_index >= grid.valid.size() || right_index >= grid.valid.size()
+        || grid.valid[left_index] == 0 || grid.valid[right_index] == 0)
+        return false;
+
+    left_height_m = grid.height[left_index];
+    right_height_m = grid.height[right_index];
+    if (!std::isfinite(left_height_m) || !std::isfinite(right_height_m))
+        return false;
+    slope_deg = std::atan2(left_height_m - right_height_m, wheel_track_m)
+        * 180.0 / 3.14159265358979323846;
+    return std::isfinite(slope_deg);
+}
+
+LateralSlopeStats inspect_lateral_slope_(const TerrainGrid& grid,
+                                         const Path& path,
+                                         double wheel_track_m)
+{
+    LateralSlopeStats stats;
+    for (const PathPoint& point : path)
+    {
+        double left_height_m = 0.0;
+        double right_height_m = 0.0;
+        double slope_deg = 0.0;
+        if (!sample_lateral_slope_(grid, point, wheel_track_m,
+                                   left_height_m, right_height_m, slope_deg))
+        {
+            ++stats.invalid_samples;
+            continue;
+        }
+        ++stats.valid_samples;
+        if (std::abs(slope_deg) > stats.max_abs_deg)
+        {
+            stats.max_abs_deg = std::abs(slope_deg);
+            stats.max_signed_deg = slope_deg;
+            stats.max_x = point.x;
+            stats.max_y = point.y;
+        }
+    }
+    return stats;
+}
+
+// 保存路径逐点横向坡度诊断，格式为：index x y yaw left_height right_height slope_deg。
+bool save_lateral_slope_(const std::filesystem::path& file,
+                         const TerrainGrid& grid, const Path& path,
+                         double wheel_track_m)
+{
+    std::ofstream output(file);
+    if (!output)
+        return false;
+    output << "index x y yaw left_height_m right_height_m lateral_slope_deg\n";
+    output << std::setprecision(17);
+    for (std::size_t index = 0; index < path.size(); ++index)
+    {
+        const PathPoint& point = path[index];
+        double left_height_m = 0.0;
+        double right_height_m = 0.0;
+        double slope_deg = 0.0;
+        const bool valid = sample_lateral_slope_(
+            grid, point, wheel_track_m, left_height_m, right_height_m,
+            slope_deg);
+        output << index << ' ' << point.x << ' ' << point.y << ' '
+               << point.yaw << ' ';
+        if (valid)
+            output << left_height_m << ' ' << right_height_m << ' '
+                   << slope_deg;
+        else
+            output << "nan nan nan";
+        output << '\n';
+    }
+    return output.good();
+}
+
+bool point_in_bounds_(const TerrainBounds& bounds, double x, double y)
+{
+    return x >= bounds.min_x && x <= bounds.max_x
+        && y >= bounds.min_y && y <= bounds.max_y;
+}
+
+// 将指定世界坐标矩形直接写入 hard_obstacle。代价地图仍保留原始地形高程，
+// 这样横向坡度诊断不会丢失；规划器只通过 isTraversable() 将这些栅格排除。
+std::size_t mark_hard_obstacle_bounds_(TerrainGrid& grid,
+                                       const TerrainBounds& bounds)
+{
+    int min_col = 0;
+    int min_row = 0;
+    int max_col = 0;
+    int max_row = 0;
+    if (!grid.worldToGrid(bounds.min_x, bounds.min_y, min_col, min_row)
+        || !grid.worldToGrid(bounds.max_x, bounds.max_y, max_col, max_row))
+        return 0;
+    if (min_col > max_col)
+        std::swap(min_col, max_col);
+    if (min_row > max_row)
+        std::swap(min_row, max_row);
+
+    std::size_t marked = 0;
+    for (int row = min_row; row <= max_row; ++row)
+    {
+        for (int col = min_col; col <= max_col; ++col)
+        {
+            if (!grid.inBounds(row, col))
+                continue;
+            const std::size_t cell_index = grid.index(row, col);
+            if (cell_index >= grid.cost.size()
+                || cell_index >= grid.hard_obstacle.size())
+                continue;
+            if (grid.hard_obstacle[cell_index] == 0)
+                ++marked;
+            grid.hard_obstacle[cell_index] = 1;
+            grid.cost[cell_index] = 1.0F;
+        }
+    }
+    return marked;
+}
+
+double distance_to_segment_(double point_x, double point_y,
+                            const AirborneValleyPoint& from,
+                            const AirborneValleyPoint& to)
+{
+    const double dx = to.x - from.x;
+    const double dy = to.y - from.y;
+    const double segment_length_squared = dx * dx + dy * dy;
+    if (segment_length_squared <= 1e-12)
+        return std::hypot(point_x - from.x, point_y - from.y);
+
+    const double projection = std::clamp(
+        ((point_x - from.x) * dx + (point_y - from.y) * dy)
+            / segment_length_squared,
+        0.0, 1.0);
+    const double closest_x = from.x + projection * dx;
+    const double closest_y = from.y + projection * dy;
+    return std::hypot(point_x - closest_x, point_y - closest_y);
+}
+
+// 将折线谷底及其两侧安全余量写入 hard_obstacle。与矩形障碍一样，
+// 这里只修改本次规划的内存网格，不改变原始高程和磁盘缓存。
+std::size_t mark_hard_obstacle_corridor_(
+    TerrainGrid& grid, const AirborneValleyPoint* centerline,
+    std::size_t centerline_count, double half_width_m)
+{
+    if (centerline == nullptr || centerline_count < 2 || half_width_m <= 0.0)
+        return 0;
+
+    double min_x = centerline[0].x;
+    double max_x = centerline[0].x;
+    double min_y = centerline[0].y;
+    double max_y = centerline[0].y;
+    for (std::size_t index = 1; index < centerline_count; ++index)
+    {
+        min_x = std::min(min_x, centerline[index].x);
+        max_x = std::max(max_x, centerline[index].x);
+        min_y = std::min(min_y, centerline[index].y);
+        max_y = std::max(max_y, centerline[index].y);
+    }
+    min_x -= half_width_m;
+    max_x += half_width_m;
+    min_y -= half_width_m;
+    max_y += half_width_m;
+
+    int min_col = 0;
+    int min_row = 0;
+    int max_col = 0;
+    int max_row = 0;
+    if (!grid.worldToGrid(min_x, min_y, min_col, min_row)
+        || !grid.worldToGrid(max_x, max_y, max_col, max_row))
+        return 0;
+    if (min_col > max_col)
+        std::swap(min_col, max_col);
+    if (min_row > max_row)
+        std::swap(min_row, max_row);
+
+    std::size_t marked = 0;
+    for (int row = min_row; row <= max_row; ++row)
+    {
+        for (int col = min_col; col <= max_col; ++col)
+        {
+            if (!grid.inBounds(row, col))
+                continue;
+            double x = 0.0;
+            double y = 0.0;
+            grid.gridToWorld(row, col, x, y);
+            double distance = std::numeric_limits<double>::infinity();
+            for (std::size_t segment = 1; segment < centerline_count;
+                 ++segment)
+            {
+                distance = std::min(distance, distance_to_segment_(
+                    x, y, centerline[segment - 1], centerline[segment]));
+            }
+            if (distance > half_width_m)
+                continue;
+
+            const std::size_t cell_index = grid.index(row, col);
+            if (cell_index >= grid.cost.size()
+                || cell_index >= grid.hard_obstacle.size())
+                continue;
+            if (grid.hard_obstacle[cell_index] == 0)
+                ++marked;
+            grid.hard_obstacle[cell_index] = 1;
+            grid.cost[cell_index] = 1.0F;
+        }
+    }
+    return marked;
+}
 
 bool cell_has_safety_margin_(const TerrainGrid& grid, int row, int col)
 {
@@ -567,6 +840,53 @@ Path PlanningPipeline::buildPath(const TaskConfig& config) const
     throw std::runtime_error("PlanningPipeline requires EchoSim SDK");
 #endif
 
+    // 这些障碍由 Test6 的四轮失载实测结果标定，但属于共享地形危险区，
+    // 所有 Test1-Test6 均必须在规划阶段避让。
+    if (config.test_number >= 1 && config.test_number <= 6)
+    {
+        for (const TerrainBounds& bounds : kAirborneZones)
+        {
+            if (point_in_bounds_(bounds, config.goal.x, config.goal.y))
+            {
+                throw std::runtime_error(
+                    "goal overlaps the configured airborne obstacle zone");
+            }
+            const std::size_t marked = mark_hard_obstacle_bounds_(
+                costmap.grid(), bounds);
+            if (marked == 0)
+            {
+                throw std::runtime_error(
+                    "airborne obstacle zone lies outside the costmap");
+            }
+            std::cout << "[planner] airborne zone blocked x=["
+                      << bounds.min_x << ',' << bounds.max_x << "] y=["
+                      << bounds.min_y << ',' << bounds.max_y << "] cells="
+                      << marked << std::endl;
+        }
+
+        const std::size_t valley_marked = mark_hard_obstacle_corridor_(
+            costmap.grid(), kAirborneValleyCenterline,
+            std::size(kAirborneValleyCenterline),
+            kAirborneValleyHalfWidthM);
+        if (valley_marked == 0)
+        {
+            throw std::runtime_error(
+                "airborne V-valley corridor lies outside the costmap");
+        }
+        if (point_in_bounds_(
+                {-613.0, -1542.0, -580.0, -1490.0},
+                config.goal.x, config.goal.y))
+        {
+            throw std::runtime_error(
+                "goal overlaps the configured airborne V-valley corridor");
+        }
+        std::cout << "[planner] airborne V-valley corridor blocked "
+                  << "centerline_points="
+                  << std::size(kAirborneValleyCenterline)
+                  << " half_width_m=" << kAirborneValleyHalfWidthM
+                  << " cells=" << valley_marked << std::endl;
+    }
+
     // 阶段 1.5（仅调试模式）：输出地形代价预览图 terrain_preview.png；
     // 失败仅告警不中断（可视化是辅助功能，不影响规划正确性）。
     if (config.enable_debug_output)
@@ -899,6 +1219,25 @@ Path PlanningPipeline::buildPath(const TaskConfig& config) const
             || !save_path_with_yaw_(config.output_directory / "optimized_path_with_yaw.txt", optimized)))
     {
         throw std::runtime_error("optimized path text output failed");
+    }
+    const LateralSlopeStats lateral_slope = inspect_lateral_slope_(
+        costmap.grid(), optimized, config.tracking.geometry.wheel_track_m);
+    std::cout << std::fixed << std::setprecision(3)
+              << "[planner] lateral slope max_abs_deg="
+              << lateral_slope.max_abs_deg
+              << " signed_deg=" << lateral_slope.max_signed_deg
+              << " at (x=" << lateral_slope.max_x
+              << ", y=" << lateral_slope.max_y << ")"
+              << " valid_samples=" << lateral_slope.valid_samples
+              << " invalid_samples=" << lateral_slope.invalid_samples
+              << std::endl;
+    if (config.enable_debug_output
+        && !save_lateral_slope_(
+            config.output_directory / "path_lateral_slope.txt",
+            costmap.grid(), optimized, config.tracking.geometry.wheel_track_m))
+    {
+        std::cerr << "[planner] warning: path_lateral_slope.txt was not written"
+                  << std::endl;
     }
     if (config.enable_debug_output
         && !save_path_image_(config.output_directory / "global_path_on_costmap.png",

@@ -335,13 +335,14 @@ TrackingCommand PathTracker::calculatePurePursuit(
     const double sideslip = std::atan2(std::abs(lateral_slip),
                                        std::max(forward_speed_(state), 0.8));
     // 侧偏角 = |后轴真实侧向滑动速度| / 前向速度（弧度）；前向速度设 0.8 m/s
-    // 下限防止停车噪声发散。侧滑状态不再做低速豁免，确保限速可真正降到
-    // slide_speed，而不会在低速时重新进入 2 m/s 速度地板。
+    // 下限防止停车噪声发散。侧滑检测始终保留，侧滑限速是否执行由配置开关决定。
     command.sliding = sideslip > config_.pure_pursuit_slide_sideslip_rad;
-    if (command.sliding)
+    const bool sideslip_speed_limit_active = command.sliding
+        && config_.enable_sideslip_speed_limit;
+    if (sideslip_speed_limit_active)
     {
-        // 超阈值（默认 5°，评分上限 8° 留余量）判定侧滑，压速到 slide_speed，
-        // 等残余滑动衰减后再逐步提速。
+        // 超阈值（默认 5°，评分上限 8° 留余量）且启用限速时，压速到
+        // slide_speed，等残余滑动衰减后再逐步提速。
         speed_cap = std::min(speed_cap, config_.pure_pursuit_slide_speed_mps);
     }
     // 四级速度门控逐级取小后，叠加到基座目标速度（距离刹车限速）之上。
@@ -353,7 +354,7 @@ TrackingCommand PathTracker::calculatePurePursuit(
     const double distance_brake_limit = LongitudinalController::distanceSpeedLimit(
         command.remaining_path_distance_m, config_.base_speed_mps,
         config_.terminal_brake_decel_mps2);
-    if (!command.sliding
+    if (!sideslip_speed_limit_active
         && distance_brake_limit > config_.pure_pursuit_min_moving_speed_mps)
     {
         command.target_speed_mps = std::max(

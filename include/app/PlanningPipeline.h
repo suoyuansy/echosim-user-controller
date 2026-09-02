@@ -1,7 +1,7 @@
 #pragma once
 
-#include "PathTypes.h"
-#include "TaskConfig.h"
+#include "common/PathTypes.h"
+#include "app/TaskConfig.h"
 
 #include <stdexcept>
 
@@ -10,5 +10,5 @@ class PlanningPipeline
 {
 public:
     // 加载或构建代价地图，规划并输出路径；失败时抛出 std::runtime_error。
-    Path buildPath(const TaskConfig& config) const;
+    RoutePlan buildPath(const TaskConfig& config) const;
 };

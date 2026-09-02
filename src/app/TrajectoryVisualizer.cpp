@@ -1,5 +1,5 @@
 // 文件功能：实现异步局部窗口绘制、实际轨迹保存和最终路径对比图。
-#include "TrajectoryVisualizer.h"
+#include "app/TrajectoryVisualizer.h"
 
 #ifdef ECHOSIM_USE_OPENCV
 #include <opencv2/highgui.hpp>
@@ -50,6 +50,7 @@ TrajectoryVisualizer::~TrajectoryVisualizer()
 bool TrajectoryVisualizer::initialize(const Path& path,
                                       const Pose2D& start,
                                       const Pose2D& goal,
+                                      const std::vector<Pose2D>& waypoints,
                                       const std::string& output_directory,
                                       bool enable_visualization,
                                       double sample_interval_sec)
@@ -60,12 +61,15 @@ bool TrajectoryVisualizer::initialize(const Path& path,
     path_ = path;
     start_ = start;
     goal_ = goal;
+    waypoints_ = waypoints;
     output_directory_ = output_directory;
     enable_visualization_ = enable_visualization;
     sample_interval_sec_ = std::max(0.1, sample_interval_sec);
     actual_points_.clear();
     has_sample_time_ = false;
     has_window_anchor_ = false;
+    next_frame_sequence_ = 0;
+    latest_requested_sequence_ = 0;
     frame_pending_ = false;
 #ifdef ECHOSIM_USE_OPENCV
     latest_image_.release();
@@ -92,12 +96,14 @@ bool TrajectoryVisualizer::initialize(const Path& path,
         std::lock_guard<std::mutex> lock(mutex_);
         window_anchor_index_ = 0;
         has_window_anchor_ = true;
+        pending_frame_.sequence = ++next_frame_sequence_;
         pending_frame_.state = {start_.x, start_.y, start_.yaw, 0.0, 0.0};
         pending_frame_.reference_index = 0;
         pending_frame_.window_anchor_index = 0;
         pending_frame_.actual_points.clear();
         pending_frame_.actual_total = 0;
         pending_frame_.valid = true;
+        latest_requested_sequence_ = pending_frame_.sequence;
         frame_pending_ = true;
     }
 #ifdef ECHOSIM_USE_OPENCV
@@ -138,6 +144,7 @@ void TrajectoryVisualizer::update(const VehicleState2D& state,
         has_window_anchor_ = true;
     }
     pending_frame_.state = state;
+    pending_frame_.sequence = ++next_frame_sequence_;
     pending_frame_.reference_index = safe_index;
     pending_frame_.window_anchor_index = window_anchor_index_;
     pending_frame_.actual_points.clear();
@@ -151,6 +158,7 @@ void TrajectoryVisualizer::update(const VehicleState2D& state,
             pending_frame_.actual_points.push_back(*it);
     }
     pending_frame_.valid = true;
+    latest_requested_sequence_ = pending_frame_.sequence;
     frame_pending_ = true;
     condition_.notify_one();
 }
@@ -248,8 +256,12 @@ void TrajectoryVisualizer::workerLoop_()
             if (!image.empty())
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                latest_image_ = std::move(image);
-                image_pending_ = true;
+                // 控制循环可能在本帧渲染时提交了更新帧，旧帧不能回退覆盖。
+                if (frame.sequence == latest_requested_sequence_)
+                {
+                    latest_image_ = std::move(image);
+                    image_pending_ = true;
+                }
             }
 #endif
         }
@@ -283,9 +295,11 @@ cv::Mat TrajectoryVisualizer::renderFrame_(const Frame& frame) const
     }
     if (reference_pixels.size() > 1)
         cv::polylines(image, reference_pixels, false, cv::Scalar(0, 0, 255), 1);
+    // 保留原有全局路径点数字标注，便于在实时窗口中核对控制索引。
     for (std::size_t index = 0; index < reference_pixels.size(); ++index)
-        cv::putText(image, std::to_string(reference_indices[index]), reference_pixels[index],
-                    cv::FONT_HERSHEY_SIMPLEX, 0.3, cv::Scalar(0, 0, 255), 1);
+        cv::putText(image, std::to_string(reference_indices[index]),
+                    reference_pixels[index], cv::FONT_HERSHEY_SIMPLEX, 0.3,
+                    cv::Scalar(0, 0, 255), 1);
     std::vector<cv::Point> actual_pixels;
     for (const Pose2D& actual : frame.actual_points)
     {
@@ -319,13 +333,29 @@ cv::Mat TrajectoryVisualizer::renderFrame_(const Frame& frame) const
                     cv::FONT_HERSHEY_SIMPLEX, 0.3, cv::Scalar(255, 0, 0), 1);
     };
     draw_marker(start_, "start");
+    for (std::size_t index = 0; index < waypoints_.size(); ++index)
+    {
+        const std::string label = "wp" + std::to_string(index + 1);
+        const Pose2D& waypoint = waypoints_[index];
+        const cv::Point point = toLocalPixel(waypoint.x, waypoint.y,
+                                             center.x, center.y);
+        if (inImage(point))
+        {
+            cv::circle(image, point, 4, cv::Scalar(0, 165, 255), -1);
+            cv::putText(image, label, point + cv::Point(4, -4),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.3,
+                        cv::Scalar(0, 165, 255), 1);
+        }
+    }
     draw_marker(goal_, "goal");
 
-    const std::vector<std::string> status_lines{
+    std::vector<std::string> status_lines{
         "window_ref=" + std::to_string(frame.window_anchor_index),
-        "control_ref=" + std::to_string(frame.reference_index),
-        "actual_total=" + std::to_string(frame.actual_total),
-        "visible_actual=" + std::to_string(actual_pixels.size())};
+        "control_ref=" + std::to_string(frame.reference_index)};
+    const std::vector<std::string> path_index_lines = pathIndexStatusLines_(
+        path_, waypoints_, goal_);
+    status_lines.insert(status_lines.end(), path_index_lines.begin(),
+                        path_index_lines.end());
     for (std::size_t index = 0; index < status_lines.size(); ++index)
     {
         cv::putText(image, status_lines[index], {5, 15 + static_cast<int>(index) * 15},
@@ -386,6 +416,9 @@ bool TrajectoryVisualizer::renderGlobalComparison_(
     if (actual_pixels.size() > 1)
         cv::polylines(image, actual_pixels, false, cv::Scalar(255, 0, 0), 2);
     cv::circle(image, to_pixel(start_.x, start_.y), 5, cv::Scalar(0, 180, 0), -1);
+    for (const Pose2D& waypoint : waypoints_)
+        cv::circle(image, to_pixel(waypoint.x, waypoint.y), 5,
+                   cv::Scalar(0, 165, 255), -1);
     cv::circle(image, to_pixel(goal_.x, goal_.y), 5, cv::Scalar(255, 0, 0), -1);
     return cv::imwrite((std::filesystem::path(output_directory_)
                         / "global_and_actual_final.png").string(), image);

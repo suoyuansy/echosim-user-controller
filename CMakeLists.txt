@@ -34,17 +34,143 @@ set(OPENCV_LIB_DIR "${OPENCV_ROOT}/lib")
 set(OPENCV_BIN_DIR "${OPENCV_ROOT}/bin")
 
 set(USER_CONTROLLER_SOURCES
-    src/UserControllerTest.cpp
-    src/TerrainCostmap.cpp
-    src/GlobalPlanner.cpp
-    src/PathTracker.cpp
-    src/TrajectoryVisualizer.cpp
-    src/TaskConfig.cpp
-    src/PlanningPipeline.cpp
-    src/EchoSimRuntime.cpp
+    src/app/UserController.cpp
+    src/app/TrajectoryVisualizer.cpp
+    src/app/TaskConfig.cpp
+    src/app/PlanningPipeline.cpp
+    src/app/SegmentPlanningPolicy.cpp
+    src/app/SpeedControlLogger.cpp
+    src/planning/TerrainCostmap.cpp
+    src/planning/GlobalPlanner.cpp
+    src/tracking/PathTracker.cpp
+    src/tracking/EchoSimRuntime.cpp
+    src/tracking/ReversePlanner.cpp
+    src/tracking/TerrainSurfaceQuery.cpp
 )
 
 add_executable(UserControllerTest ${USER_CONTROLLER_SOURCES})
+
+option(BUILD_SELF_TESTS "Build focused local regression tests" OFF)
+
+if(BUILD_SELF_TESTS)
+    enable_testing()
+    add_executable(TerrainCostmapSelfTest
+        tests/TerrainCostmapSelfTest.cpp
+        src/planning/TerrainCostmap.cpp
+    )
+    target_include_directories(TerrainCostmapSelfTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${ECHOSIM_INCLUDE_DIR}"
+        "${ECHOSIM_INCLUDE_DIR}/terrain"
+    )
+
+    add_executable(SpeedControlLoggerSelfTest
+        tests/SpeedControlLoggerSelfTest.cpp
+        src/app/SpeedControlLogger.cpp
+    )
+    target_include_directories(SpeedControlLoggerSelfTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+
+    add_executable(GlobalPlannerSelfTest
+        tests/GlobalPlannerSelfTest.cpp
+        src/planning/GlobalPlanner.cpp
+    )
+    target_include_directories(GlobalPlannerSelfTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${ECHOSIM_INCLUDE_DIR}"
+        "${ECHOSIM_INCLUDE_DIR}/terrain"
+    )
+
+    add_executable(TrajectoryVisualizerSelfTest
+        tests/TrajectoryVisualizerSelfTest.cpp
+    )
+    target_include_directories(TrajectoryVisualizerSelfTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+
+    add_executable(VehicleUnitsSelfTest
+        tests/VehicleUnitsSelfTest.cpp
+    )
+    target_include_directories(VehicleUnitsSelfTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+
+    add_executable(LongitudinalControllerSelfTest
+        tests/LongitudinalControllerSelfTest.cpp
+        src/tracking/PathTracker.cpp
+    )
+    target_include_directories(LongitudinalControllerSelfTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+
+    add_executable(TaskConfigSelfTest
+        tests/TaskConfigSelfTest.cpp
+        src/app/TaskConfig.cpp
+    )
+    target_include_directories(TaskConfigSelfTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${ECHOSIM_INCLUDE_DIR}"
+        "${ECHOSIM_INCLUDE_DIR}/terrain"
+    )
+    if(MSVC)
+        target_compile_options(TaskConfigSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ReverseControlSelfTest
+        tests/ReverseControlSelfTest.cpp
+        src/tracking/ReversePlanner.cpp
+        src/tracking/PathTracker.cpp
+    )
+    target_include_directories(ReverseControlSelfTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+
+    add_executable(GoalParkingSelfTest
+        tests/GoalParkingSelfTest.cpp
+    )
+    target_include_directories(GoalParkingSelfTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+
+    add_executable(SegmentPlanningPolicySelfTest
+        tests/SegmentPlanningPolicySelfTest.cpp
+        src/app/SegmentPlanningPolicy.cpp
+    )
+    target_include_directories(SegmentPlanningPolicySelfTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+
+    if(MSVC)
+        set(_self_test_targets
+            TerrainCostmapSelfTest
+            SpeedControlLoggerSelfTest
+            GlobalPlannerSelfTest
+            TrajectoryVisualizerSelfTest
+            VehicleUnitsSelfTest
+            LongitudinalControllerSelfTest
+            TaskConfigSelfTest
+            ReverseControlSelfTest
+            GoalParkingSelfTest
+            SegmentPlanningPolicySelfTest)
+        foreach(_self_test_target IN LISTS _self_test_targets)
+            target_compile_options(${_self_test_target} PRIVATE /utf-8)
+        endforeach()
+        target_compile_definitions(TrajectoryVisualizerSelfTest PRIVATE
+            _ALLOW_KEYWORD_MACROS)
+    endif()
+
+    add_test(NAME TerrainCostmapSelfTest COMMAND TerrainCostmapSelfTest)
+    add_test(NAME SpeedControlLoggerSelfTest COMMAND SpeedControlLoggerSelfTest)
+    add_test(NAME GlobalPlannerSelfTest COMMAND GlobalPlannerSelfTest)
+    add_test(NAME TrajectoryVisualizerSelfTest COMMAND TrajectoryVisualizerSelfTest)
+    add_test(NAME VehicleUnitsSelfTest COMMAND VehicleUnitsSelfTest)
+    add_test(NAME LongitudinalControllerSelfTest COMMAND LongitudinalControllerSelfTest)
+    add_test(NAME TaskConfigSelfTest COMMAND TaskConfigSelfTest)
+    add_test(NAME ReverseControlSelfTest COMMAND ReverseControlSelfTest)
+    add_test(NAME GoalParkingSelfTest COMMAND GoalParkingSelfTest)
+    add_test(NAME SegmentPlanningPolicySelfTest COMMAND SegmentPlanningPolicySelfTest)
+endif()
 
 target_compile_definitions(UserControllerTest PRIVATE
     ECHOSIM_USE_ECHOSIM_SDK

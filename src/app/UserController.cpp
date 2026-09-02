@@ -1,18 +1,22 @@
 // 构造默认配置，编排规划流程和 EchoSim 运行时，并统一处理异常。
-#include "EchoSimRuntime.h"
-#include "PlanningPipeline.h"
-#include "TaskConfig.h"
+#include "tracking/EchoSimRuntime.h"
+#include "app/PlanningPipeline.h"
+#include "app/TaskConfig.h"
 
 #include <iomanip>
 #include <iostream>
 
 namespace
 {
+// 在此切换 Test2、Test4、Test5、Test6 或 Test7；当前为 wp2 前起跑的 Test7。
+constexpr int kSelectedTestNumber = 4;
+
 // 输出任务、调试模式和控制日志周期，便于确认当前运行配置。
 void printTaskConfiguration(const TaskConfig& config)
 {
     std::cout << std::fixed << std::setprecision(3)
               << "[task] configuration loaded" << std::endl
+              << "[task] test_number=" << config.test_number << std::endl
               << "[task] start=(x=" << config.start.x
               << ",y=" << config.start.y
               << ",yaw_rad=" << config.start.yaw << ')' << std::endl
@@ -33,7 +37,8 @@ int main()
     try
     {
         // 创建任务配置
-        const TaskConfig config = makeDefaultTaskConfig();
+        const TaskConfig config = makeTaskConfigForTest(kSelectedTestNumber);
+        std::cout << "[task] Test" << config.test_number << " selected" << std::endl;
         printTaskConfiguration(config);
 
         // 初始化 EchoSim 消息系统，随后等待车辆状态并发布控制量。
@@ -42,10 +47,10 @@ int main()
 
         // 构建或读取地形代价地图，并规划全局路径。
         PlanningPipeline pipeline;
-        const Path path = pipeline.buildPath(config);
+        const RoutePlan route = pipeline.buildPath(config);
 
         // 进入车辆控制循环，直到任务完成或运行时返回错误。
-        return runtime.run(config, path);
+        return runtime.run(config, route);
     }
     catch (const std::exception& error)
     {

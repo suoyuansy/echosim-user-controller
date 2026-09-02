@@ -1,6 +1,11 @@
 #pragma once
 
+#include <cstddef>
+#include <memory>
 #include <vector>
+
+struct TerrainGrid;
+class TerrainSurfaceQuery;
 
 // 定义路径规划、路径跟踪和可视化共用的二维位姿与路径点类型。
 struct Pose2D
@@ -18,3 +23,12 @@ struct PathPoint
 };
 
 using Path = std::vector<PathPoint>;
+
+// 完整路线以及需要停车的途经点在路径中的索引。
+struct RoutePlan
+{
+    Path path;
+    std::vector<std::size_t> stop_indices;
+    std::shared_ptr<const TerrainGrid> terrain_grid;
+    std::shared_ptr<const TerrainSurfaceQuery> surface_query;
+};
